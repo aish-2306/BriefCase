@@ -1,0 +1,20 @@
+# Dependency directories
+node_modules/
+jspm_packages/
+.pnp
+.pnp.js
+
+# Local environment variables configuration arrays
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Local media storage cache filters
+public/audio/
+*.mp3
+
+# Operating system systemic metadata logs
+.DS_Store
+Thumbs.db
