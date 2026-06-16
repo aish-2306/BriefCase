@@ -34,12 +34,7 @@ app.post('/api/auth/signup', async (req, res) => {
     const { data, error } = await supabase.auth.signUp({ email, password });
     if (error) return res.status(400).json({ error: error.message });
     
-    // Explicitly write to public users tracking table
-    const { error: upsertError } = await supabase
-        .from('users')
-        .upsert({ email: email, name: name, voice_accent: 'en-US-AriaNeural' }, { onConflict: 'email' });
-        
-    if (upsertError) console.error("Signup SQL Table insertion failure:", upsertError);
+    await supabase.from('users').upsert({ email: email, name: name, voice_accent: 'en-US-AriaNeural' }, { onConflict: 'email' });
     return res.json({ email: email });
 });
 
@@ -47,7 +42,7 @@ app.post('/api/auth/signin', async (req, res) => {
     const email = req.body.email.toLowerCase().trim();
     const { password } = req.body;
     
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    const { data, error = null } = await supabase.auth.signInWithPassword({ email, password });
     if (error) return res.status(400).json({ error: error.message });
     return res.json({ email: data.user.email.toLowerCase() });
 });
@@ -73,7 +68,7 @@ app.get('/auth/google', (req, res) => {
     const userEmailState = req.query.email.toLowerCase().trim();
     const url = oauth2Client.generateAuthUrl({
         access_type: 'offline',
-        prompt: 'consent', // Forces fresh authorization and generation of refresh tokens
+        prompt: 'consent',
         state: userEmailState,
         scope: ['https://www.googleapis.com/auth/calendar.readonly', 'https://www.googleapis.com/auth/gmail.readonly']
     });
@@ -86,19 +81,12 @@ app.get('/auth/google/callback', async (req, res) => {
     try {
         const { tokens } = await oauth2Client.getToken(code);
         
-        if (!tokens.refresh_token) {
-            console.log("⚠️ Google didn't return a refresh token. Attempting fallback collection...");
-        }
-
-        // BULLETPROOF FIX: Use upsert instead of update here. 
-        // If your database profile row is missing, this automatically seeds it dynamically!
         const { error } = await supabase.from('users').upsert({
             email: targetEmail,
             google_refresh_token: tokens.refresh_token
         }, { onConflict: 'email' });
 
         if (error) throw error;
-
         res.redirect(`/?login_success=true&email=${encodeURIComponent(targetEmail)}&google_linked=true`);
     } catch (err) {
         console.error("Auth Linkage failure:", err);
@@ -109,12 +97,27 @@ app.get('/auth/google/callback', async (req, res) => {
 // --- CORE PIPELINE AUDIO AUTOMATION GENERATOR ---
 app.post('/api/generate-brief', async (req, res) => {
     const email = req.body.email.toLowerCase().trim();
-    const { localWeather, localClock } = req.body;
+    const { userTimezone, deviceClock, geoCoordinates } = req.body;
 
     try {
         const { data: user, error } = await supabase.from('users').select('*').eq('email', email).single();
         if (error || !user || !user.google_refresh_token) {
             return res.status(404).json({ error: "Google data synchronization missing." });
+        }
+
+        // 1. Dynamic Geolocation Weather Integration
+        let spatialWeatherResult = "Scattered clouds, ambient conditions.";
+        if (geoCoordinates && geoCoordinates.lat && geoCoordinates.lon) {
+            try {
+                const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${geoCoordinates.lat}&longitude=${geoCoordinates.lon}&current_weather=true`;
+                const weatherResponse = await fetch(weatherUrl);
+                const weatherData = await weatherResponse.json();
+                if (weatherData && weatherData.current_weather) {
+                    spatialWeatherResult = `${weatherData.current_weather.temperature}°C with a local wind speed of ${weatherData.current_weather.windspeed} km/h.`;
+                }
+            } catch (wErr) {
+                console.log("Weather parsing cascaded gracefully to basic parameters.");
+            }
         }
 
         const userAuth = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET);
@@ -123,11 +126,15 @@ app.post('/api/generate-brief', async (req, res) => {
         const calendar = google.calendar({ version: 'v3', auth: userAuth });
         const gmail = google.gmail({ version: 'v1', auth: userAuth });
 
+        const localNow = new Date(deviceClock);
+        const endOfDay = new Date(deviceClock);
+        endOfDay.setHours(23, 59, 59, 999);
+
         const [calendarData, gmailData] = await Promise.all([
             calendar.events.list({
                 calendarId: 'primary',
-                timeMin: new Date().toISOString(),
-                maxResults: 5,
+                timeMin: localNow.toISOString(),
+                timeMax: endOfDay.toISOString(),
                 singleEvents: true,
                 orderBy: 'startTime'
             }),
@@ -142,10 +149,22 @@ app.post('/api/generate-brief', async (req, res) => {
             }
         }
 
+        // 2. Exact Timezone Schedule Alignment
+        const synchronizedCalendarEvents = calendarData.data.items.map(item => {
+            const startRaw = item.start.dateTime || item.start.date;
+            const formattedTime = new Date(startRaw).toLocaleTimeString(undefined, {
+                timeZone: userTimezone,
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+            return `${item.summary} starting exactly at ${formattedTime}`;
+        });
+
         const consolidatedData = {
-            currentTime: localClock,
-            currentWeather: localWeather,
-            calendar: calendarData.data.items.map(item => `${item.summary} starting at ${item.start.dateTime || item.start.date}`),
+            currentTimeAndDate: deviceClock,
+            regionalTargetTimezone: userTimezone,
+            currentWeatherMetrics: spatialWeatherResult,
+            calendar: synchronizedCalendarEvents,
             starredInboxSnippets: customPriorityEmails,
             whatsappAlerts: user.whatsapp_snippet
         };
@@ -158,12 +177,13 @@ app.post('/api/generate-brief', async (req, res) => {
                 Compose a human, beautifully structured narrative spoken script. 
                 STRICT PROTOCOLS:
                 1. You MUST start the script word-for-word with: "Good Morning, Boss."
-                2. Do not use structural markdown elements (like asterisks, headers, lists, or bullets).
-                3. Do not include programmatic labels or sound cues. Deliver text meant strictly for fluid reading.
-                4. Blend schedules, priority alerts, and external metrics naturally.`
+                2. Base all calculations of timing references, alarms, and schedule ranges directly on the provided currentTimeAndDate and regionalTargetTimezone.
+                3. Do not use structural markdown elements (like asterisks, headers, lists, or bullets).
+                4. Do not include programmatic labels or sound cues. Deliver text meant strictly for fluid reading.
+                5. Blend schedules, priority alerts, and external metrics naturally.`
             });
         } catch (modelErr) {
-            console.log("Primary endpoint unavailable, utilizing adaptive rendering fallback layer...");
+            console.log("Primary SDK routing bottleneck encountered. Accessing fallback matrix...");
             aiResponse = await ai.models.generateContent({
                 model: 'gemini-2.5-flash',
                 contents: `Write a casual daily summary text transcript based on this objective block: ${JSON.stringify(consolidatedData)}. Start strictly with: "Good Morning, Boss." Clear all markdown syntax elements.`
@@ -173,8 +193,8 @@ app.post('/api/generate-brief', async (req, res) => {
         const scriptText = aiResponse.text;
         
         const tts = new MsEdgeTTS();
-        const activeVoice = user.voice_accent || 'en-US-AriaNeural';
-        await tts.setMetadata(activeVoice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
+        // Force execution strictly under the standard functional US Neural pathing voice asset
+        await tts.setMetadata('en-US-AriaNeural', OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
         
         const uniqueSubDirName = `brief-${Date.now()}`;
         const finalTargetDir = path.join(audioCacheDir, uniqueSubDirName);
@@ -183,6 +203,8 @@ app.post('/api/generate-brief', async (req, res) => {
             fs.mkdirSync(finalTargetDir, { recursive: true });
         }
 
+        // FIXED PATH BOUNDARY: Pass only the destination directory folder. 
+        // The library will handle adding 'audio.mp3' correctly internally without double path stacking.
         await tts.toFile(finalTargetDir, scriptText);
 
         return res.json({ text: scriptText, streamUrl: `/audio/${uniqueSubDirName}/audio.mp3` });
@@ -191,14 +213,6 @@ app.post('/api/generate-brief', async (req, res) => {
         console.error("Pipeline breakdown:", pipelineErr);
         return res.status(500).json({ error: pipelineErr.message });
     }
-});
-
-app.post('/api/update-voice', async (req, res) => {
-    const email = req.body.email.toLowerCase().trim();
-    const { voiceAccent } = req.body;
-    const { error } = await supabase.from('users').update({ voice_accent: voiceAccent }).eq('email', email);
-    if (error) return res.status(500).json({ error: "Database update failure." });
-    return res.json({ success: true });
 });
 
 const PORT = process.env.PORT || 5000;
