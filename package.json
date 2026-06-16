@@ -1,0 +1,17 @@
+{
+  "name": "aurabrief-core",
+  "version": "1.0.0",
+  "description": "Production-grade automated personalized morning briefing application",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@google/genai": "latest",
+    "@supabase/supabase-js": "^2.39.0",
+    "dotenv": "^16.3.1",
+    "msedge-tts": "latest",
+    "express": "^4.18.2",
+    "googleapis": "^126.0.0"
+  }
+}

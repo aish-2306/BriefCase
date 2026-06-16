@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AuraBrief Portal</title>
+    <style>
+        :root { --bg: #070a13; --card: rgba(255,255,255,0.03); --border: rgba(255,255,255,0.08); --accent: #4f46e5; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: var(--bg); color: #f8fafc; font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }
+        .wrapper { width: 100%; max-width: 420px; background: var(--card); backdrop-filter: blur(20px); border: 1px solid var(--border); border-radius: 32px; padding: 35px; text-align: center; box-shadow: 0 30px 60px rgba(0,0,0,0.6); }
+        .btn { width: 100%; background: var(--accent); color: white; border: none; padding: 14px; border-radius: 14px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: opacity 0.2s; margin-top: 15px; }
+        .btn:hover { opacity: 0.9; }
+        input, select { width: 100%; background: #0c111d; border: 1px solid var(--border); padding: 12px; border-radius: 10px; color: white; margin-top: 8px; margin-bottom: 15px; font-size: 0.95rem; }
+        .hidden { display: none !important; }
+        #status { font-size: 0.85rem; color: #818cf8; margin-top: 15px; min-height: 18px; }
+        .toggle-link { color: #818cf8; cursor: pointer; font-size: 0.85rem; margin-top: 15px; display: inline-block; }
+    </style>
+</head>
+<body>
+
+    <div class="wrapper">
+        <h1>AuraBrief</h1>
+        <p style="color: #94a3b8; font-size: 0.9rem; margin-bottom: 30px;">Automated Executive Interface</p>
+
+        <div id="authSection">
+            <h3 id="authTitle" style="margin-bottom: 15px;">Account Sign In</h3>
+            <input type="text" id="authName" placeholder="Enter your full name" class="hidden">
+            <input type="email" id="authEmail" placeholder="Enter your email">
+            <input type="password" id="authPassword" placeholder="Enter password">
+            <button class="btn" id="authBtn" onclick="handleNativeAuth()">Sign In</button>
+            <div class="toggle-link" id="authToggle" onclick="toggleAuthMode()">Don't have an account? Sign Up</div>
+        </div>
+
+        <div id="linkSection" class="hidden">
+            <h3 style="margin-bottom: 15px;">Step 2: Connect Core Data</h3>
+            <p style="font-size: 0.9rem; color: #94a3b8; margin-bottom: 20px;">Your profile is live. Now link your Google Account to unlock automated briefs.</p>
+            <button class="btn" style="background:#db4437;" onclick="linkGoogleAccount()">Connect Google Workspace</button>
+            <div class="toggle-link" style="color: #ef4444; margin-top: 25px;" onclick="triggerClearSession()">← Back to Sign In</div>
+        </div>
+
+        <div id="dashboardSection" class="hidden">
+            <p id="userGreeting" style="font-size: 1.1rem; color: #fff; margin-bottom: 5px; font-weight: 600;"></p>
+            <p style="color: #94a3b8; font-size: 0.9rem; margin-bottom: 20px;">Welcome back to your control hub.</p>
+            
+            <label style="display:block; text-align:left; font-size: 0.85rem; color: #94a3b8;">Choose Voice Accent</label>
+            <select id="voiceSelector" onchange="updateVoiceAccent()">
+                <option value="en-US-AriaNeural">Neural Voice Studio - US English</option>
+                <option value="en-GB-SoniaNeural">Neural Voice Studio - UK English</option>
+                <option value="en-IN-NeerjaNeural">Neural Voice Studio - India English</option>
+                <option value="en-AU-NatashaNeural">Neural Voice Studio - Australian English</option>
+            </select>
+
+            <button class="btn" id="playBtn" onclick="toggleAudioEngine()">Generate & Play Briefing</button>
+            <div id="status"></div>
+            <div class="toggle-link" style="color: #ef4444; margin-top: 25px;" onclick="triggerClearSession()">Disconnect & Logout</div>
+        </div>
+    </div>
+
+    <script>
+        let audioTrack = null;
+        let isSignUpMode = false;
+        let userEmail = sessionStorage.getItem('aurabrief_user');
+
+        window.onload = async () => {
+            const params = new URLSearchParams(window.location.search);
+            const successParam = params.get('login_success');
+            const emailParam = params.get('email');
+            const googleLinkedParam = params.get('google_linked');
+            
+            if (successParam === 'true' && emailParam) {
+                userEmail = emailParam.toLowerCase().trim();
+                sessionStorage.setItem('aurabrief_user', userEmail);
+                
+                // If the backend sent back the direct override flag, store it in session storage instantly
+                if (googleLinkedParam === 'true') {
+                    sessionStorage.setItem('google_verified_override', 'true');
+                }
+                
+                window.history.replaceState({}, document.title, "/");
+            }
+            await evaluateApplicationState();
+        };
+
+        async function evaluateApplicationState() {
+            if (!userEmail) {
+                document.getElementById('authSection').classList.remove('hidden');
+                document.getElementById('linkSection').classList.add('hidden');
+                document.getElementById('dashboardSection').classList.add('hidden');
+                return;
+            }
+
+            // Fix: Check if we have a direct override from the redirect first
+            const hasOverride = sessionStorage.getItem('google_verified_override') === 'true';
+            let hasGoogleLink = hasOverride;
+
+            // If no override exists, fall back to checking the DB (for return sign-ins)
+            if (!hasGoogleLink) {
+                hasGoogleLink = await checkGoogleLinkStatus(userEmail);
+            }
+
+            if (!hasGoogleLink) {
+                document.getElementById('authSection').classList.add('hidden');
+                document.getElementById('linkSection').classList.remove('hidden');
+                document.getElementById('dashboardSection').classList.add('hidden');
+            } else {
+                document.getElementById('authSection').classList.add('hidden');
+                document.getElementById('linkSection').classList.add('hidden');
+                document.getElementById('dashboardSection').classList.remove('hidden');
+                await fetchUserDetails(userEmail);
+            }
+        }
+
+        function triggerClearSession() {
+            if(audioTrack) { audioTrack.pause(); audioTrack = null; }
+            sessionStorage.clear();
+            userEmail = null;
+            evaluateApplicationState();
+        }
+
+        async function fetchUserDetails(email) {
+            try {
+                const res = await fetch(`/api/user-details?email=${encodeURIComponent(email.toLowerCase().trim())}`);
+                const data = await res.json();
+                document.getElementById('userGreeting').innerText = data.name ? `Good Day, ${data.name}` : `Active Session: ${email}`;
+            } catch (err) {
+                document.getElementById('userGreeting').innerText = `Active Session: ${email}`;
+            }
+        }
+
+        async function checkGoogleLinkStatus(email) {
+            try {
+                const res = await fetch(`/api/check-google-link?email=${encodeURIComponent(email.toLowerCase().trim())}`);
+                const data = await res.json();
+                return data.hasToken === true;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function toggleAuthMode() {
+            isSignUpMode = !isSignUpMode;
+            document.getElementById('authTitle').innerText = isSignUpMode ? "Create Account" : "Account Sign In";
+            document.getElementById('authBtn').innerText = isSignUpMode ? "Sign Up" : "Sign In";
+            document.getElementById('authToggle').innerText = isSignUpMode ? "Already registered? Sign In" : "Don't have an account? Sign Up";
+            
+            if (isSignUpMode) {
+                document.getElementById('authName').classList.remove('hidden');
+            } else {
+                document.getElementById('authName').classList.add('hidden');
+            }
+        }
+
+        function validatePassword(pass) {
+            if (pass.length <= 6 || pass.length >= 15) return "Password length must be between 7 and 14 characters.";
+            if (/^[0-9!@#$%^&*(),.?":{}|<>_]/.test(pass)) return "Password cannot start with a number or special character.";
+            if (!/[A-Z]/.test(pass)) return "Password must contain at least one uppercase letter.";
+            if (!/[0-9]/.test(pass)) return "Password must contain at least one number.";
+            if (!/[!@#$%^&*(),.?":{}|<>_]/.test(pass)) return "Password must contain at least one special character.";
+            return true;
+        }
+
+        async function handleNativeAuth() {
+            const email = document.getElementById('authEmail').value.trim().toLowerCase();
+            const password = document.getElementById('authPassword').value;
+            const name = document.getElementById('authName').value.trim();
+            const endpoint = isSignUpMode ? '/api/auth/signup' : '/api/auth/signin';
+
+            if (!email || !password || (isSignUpMode && !name)) {
+                return alert("Please fill in all input boxes.");
+            }
+
+            if (isSignUpMode) {
+                const passCheck = validatePassword(password);
+                if (passCheck !== true) {
+                    return alert(passCheck);
+                }
+            }
+
+            try {
+                const res = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, password, name })
+                });
+                const data = await res.json();
+                
+                if (data.error) throw new Error(data.error);
+
+                userEmail = data.email.toLowerCase().trim();
+                sessionStorage.setItem('aurabrief_user', userEmail);
+                await evaluateApplicationState();
+            } catch (err) {
+                alert(err.message);
+            }
+        }
+
+        function linkGoogleAccount() {
+            window.location.href = `/auth/google?email=${encodeURIComponent(userEmail.toLowerCase().trim())}`;
+        }
+
+        async function updateVoiceAccent() {
+            await fetch('/api/update-voice', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email: userEmail.toLowerCase().trim(), voiceAccent: document.getElementById('voiceSelector').value })
+            });
+        }
+
+        async function toggleAudioEngine() {
+            const btn = document.getElementById('playBtn');
+            const statusDiv = document.getElementById('status');
+
+            if (audioTrack && !audioTrack.paused) {
+                audioTrack.pause();
+                btn.innerText = "Resume Briefing";
+                statusDiv.innerText = "Briefing paused.";
+                return;
+            } else if (audioTrack && audioTrack.paused) {
+                audioTrack.play();
+                btn.innerText = "Pause Briefing";
+                statusDiv.innerText = "Playing...";
+                return;
+            }
+
+            btn.innerText = "Parsing Live Feeds...";
+            statusDiv.innerText = "Compiling Calendar and Starred Email arrays...";
+            btn.disabled = true;
+
+            try {
+                const res = await fetch('/api/generate-brief', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        email: userEmail.toLowerCase().trim(),
+                        localWeather: "Scattered clouds, 30°C",
+                        localClock: new Date().toLocaleTimeString()
+                    })
+                });
+                
+                const data = await res.json();
+                if(data.error) throw new Error(data.error);
+
+                audioTrack = new Audio(data.streamUrl);
+                audioTrack.play();
+                
+                btn.disabled = false;
+                btn.innerText = "Pause Briefing";
+                statusDiv.innerText = "Streaming narrative audio feed...";
+
+                audioTrack.onended = () => {
+                    btn.innerText = "Generate & Play Briefing";
+                    statusDiv.innerText = "Briefing completed. Have an exceptional day, Boss.";
+                    audioTrack = null;
+                };
+            } catch (e) {
+                console.error(e);
+                btn.disabled = false;
+                btn.innerText = "Execution Failure";
+                statusDiv.innerText = e.message;
+            }
+        }
+    </script>
+</body>
+</html>
