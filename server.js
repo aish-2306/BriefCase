@@ -26,14 +26,47 @@ const oauth2Client = new google.auth.OAuth2(
     'http://localhost:5000/auth/google/callback'
 );
 
+// Helper function to process TTS with an inline retry mechanism
+async function compileSpeechWithRetry(ttsEngine, targetDirectory, textContent, retries = 3) {
+    for (let i = 0; i < retries; i++) {
+        try {
+            const cleanText = textContent.replace(/[*#_`\-]/g, ' ').trim();
+            await ttsEngine.toFile(targetDirectory, cleanText);
+            return;
+        } catch (err) {
+            if (i === retries - 1) throw err;
+            console.log(`🔄 TTS server stutter detected. Retrying voice compilation (Attempt ${i + 1}/${retries})...`);
+            await new Promise(res => setTimeout(res, 1000));
+        }
+    }
+}
+
+// Helper function to handle exponential backoff for 503 resilience
+async function generateContentWithRetry(prompt, retries = 3, delay = 1000) {
+    for (let i = 0; i < retries; i++) {
+        try {
+            return await ai.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: prompt
+            });
+        } catch (err) {
+            if (err.status === 503 || JSON.stringify(err).includes('503') || i === retries - 1) {
+                console.log(`⚠️ Gemini 503 traffic bottleneck detected. Retrying in ${delay}ms... (Attempt ${i + 1}/${retries})`);
+                await new Promise(res => setTimeout(res, delay));
+                delay *= 2;
+                continue;
+            }
+            throw err;
+        }
+    }
+}
+
 // --- NATIVE AUTHENTICATION ENDPOINTS ---
 app.post('/api/auth/signup', async (req, res) => {
     const email = req.body.email.toLowerCase().trim();
     const { password, name } = req.body;
-    
     const { data, error } = await supabase.auth.signUp({ email, password });
     if (error) return res.status(400).json({ error: error.message });
-    
     await supabase.from('users').upsert({ email: email, name: name, voice_accent: 'en-US-AriaNeural' }, { onConflict: 'email' });
     return res.json({ email: email });
 });
@@ -41,8 +74,7 @@ app.post('/api/auth/signup', async (req, res) => {
 app.post('/api/auth/signin', async (req, res) => {
     const email = req.body.email.toLowerCase().trim();
     const { password } = req.body;
-    
-    const { data, error = null } = await supabase.auth.signInWithPassword({ email, password });
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) return res.status(400).json({ error: error.message });
     return res.json({ email: data.user.email.toLowerCase() });
 });
@@ -57,10 +89,37 @@ app.get('/api/user-details', async (req, res) => {
 app.get('/api/check-google-link', async (req, res) => {
     const email = req.query.email.toLowerCase().trim();
     const { data, error } = await supabase.from('users').select('google_refresh_token').eq('email', email).single();
-    if (error || !data || !data.google_refresh_token) {
-        return res.json({ hasToken: false });
-    }
+    if (error || !data || !data.google_refresh_token) return res.json({ hasToken: false });
     return res.json({ hasToken: true });
+});
+
+// --- DYNAMIC AUTO-STAR RULES MANAGEMENT ENDPOINTS ---
+app.get('/api/rules', async (req, res) => {
+    const email = req.query.email.toLowerCase().trim();
+    const { data, error } = await supabase.from('auto_star_rules').select('*').eq('user_email', email);
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data);
+});
+
+app.post('/api/rules/add', async (req, res) => {
+    const email = req.body.email.toLowerCase().trim();
+    const { targetSender, customLabel } = req.body;
+    const { error } = await supabase.from('auto_star_rules').upsert({
+        user_email: email,
+        target_sender: targetSender.toLowerCase().trim(),
+        custom_label: customLabel || 'from school'
+    }, { onConflict: 'user_email,target_sender' });
+    
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ success: true });
+});
+
+app.post('/api/rules/delete', async (req, res) => {
+    const email = req.body.email.toLowerCase().trim();
+    const { ruleId } = req.body;
+    const { error } = await supabase.from('auto_star_rules').delete().eq('id', ruleId).eq('user_email', email);
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ success: true });
 });
 
 // --- GOOGLE OAUTH INTERSECT LINKAGE ---
@@ -70,7 +129,12 @@ app.get('/auth/google', (req, res) => {
         access_type: 'offline',
         prompt: 'consent',
         state: userEmailState,
-        scope: ['https://www.googleapis.com/auth/calendar.readonly', 'https://www.googleapis.com/auth/gmail.readonly']
+        scope: [
+            'https://www.googleapis.com/auth/calendar.readonly', 
+            'https://www.googleapis.com/auth/gmail.modify', 
+            'https://www.googleapis.com/auth/calendar.events',
+            'https://www.googleapis.com/auth/gmail.labels'
+        ]
     });
     res.redirect(url);
 });
@@ -80,12 +144,7 @@ app.get('/auth/google/callback', async (req, res) => {
     const targetEmail = state.toLowerCase().trim();
     try {
         const { tokens } = await oauth2Client.getToken(code);
-        
-        const { error } = await supabase.from('users').upsert({
-            email: targetEmail,
-            google_refresh_token: tokens.refresh_token
-        }, { onConflict: 'email' });
-
+        const { error } = await supabase.from('users').upsert({ email: targetEmail, google_refresh_token: tokens.refresh_token }, { onConflict: 'email' });
         if (error) throw error;
         res.redirect(`/?login_success=true&email=${encodeURIComponent(targetEmail)}&google_linked=true`);
     } catch (err) {
@@ -101,11 +160,8 @@ app.post('/api/generate-brief', async (req, res) => {
 
     try {
         const { data: user, error } = await supabase.from('users').select('*').eq('email', email).single();
-        if (error || !user || !user.google_refresh_token) {
-            return res.status(404).json({ error: "Google data synchronization missing." });
-        }
+        if (error || !user || !user.google_refresh_token) return res.status(404).json({ error: "Google data synchronization missing." });
 
-        // 1. Dynamic Geolocation Weather Integration
         let spatialWeatherResult = "Scattered clouds, ambient conditions.";
         if (geoCoordinates && geoCoordinates.lat && geoCoordinates.lon) {
             try {
@@ -115,9 +171,7 @@ app.post('/api/generate-brief', async (req, res) => {
                 if (weatherData && weatherData.current_weather) {
                     spatialWeatherResult = `${weatherData.current_weather.temperature}°C with a local wind speed of ${weatherData.current_weather.windspeed} km/h.`;
                 }
-            } catch (wErr) {
-                console.log("Weather parsing cascaded gracefully to basic parameters.");
-            }
+            } catch (wErr) { console.log("Weather parsing cascaded gracefully."); }
         }
 
         const userAuth = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET);
@@ -131,13 +185,7 @@ app.post('/api/generate-brief', async (req, res) => {
         endOfDay.setHours(23, 59, 59, 999);
 
         const [calendarData, gmailData] = await Promise.all([
-            calendar.events.list({
-                calendarId: 'primary',
-                timeMin: localNow.toISOString(),
-                timeMax: endOfDay.toISOString(),
-                singleEvents: true,
-                orderBy: 'startTime'
-            }),
+            calendar.events.list({ calendarId: 'primary', timeMin: localNow.toISOString(), timeMax: endOfDay.toISOString(), singleEvents: true, orderBy: 'startTime' }),
             gmail.users.messages.list({ userId: 'me', q: 'is:starred', maxResults: 3 })
         ]);
 
@@ -145,18 +193,16 @@ app.post('/api/generate-brief', async (req, res) => {
         if (gmailData.data.messages) {
             for (let msg of gmailData.data.messages) {
                 const content = await gmail.users.messages.get({ userId: 'me', id: msg.id });
-                customPriorityEmails.push(content.data.snippet);
+                const headers = content.data.payload.headers;
+                const subjectHeader = headers.find(h => h.name.toLowerCase() === 'subject');
+                const subject = subjectHeader ? subjectHeader.value : "No Subject";
+                customPriorityEmails.push({ id: msg.id, subject: subject, snippet: content.data.snippet });
             }
         }
 
-        // 2. Exact Timezone Schedule Alignment
         const synchronizedCalendarEvents = calendarData.data.items.map(item => {
             const startRaw = item.start.dateTime || item.start.date;
-            const formattedTime = new Date(startRaw).toLocaleTimeString(undefined, {
-                timeZone: userTimezone,
-                hour: '2-digit',
-                minute: '2-digit'
-            });
+            const formattedTime = new Date(startRaw).toLocaleTimeString(undefined, { timeZone: userTimezone, hour: '2-digit', minute: '2-digit' });
             return `${item.summary} starting exactly at ${formattedTime}`;
         });
 
@@ -169,55 +215,232 @@ app.post('/api/generate-brief', async (req, res) => {
             whatsappAlerts: user.whatsapp_snippet
         };
 
-        let aiResponse;
-        try {
-            aiResponse = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: `You are an elite executive chief of staff. Review this raw environment metric: ${JSON.stringify(consolidatedData)}.
-                Compose a human, beautifully structured narrative spoken script. 
-                STRICT PROTOCOLS:
-                1. You MUST start the script word-for-word with: "Good Morning, Boss."
-                2. Base all calculations of timing references, alarms, and schedule ranges directly on the provided currentTimeAndDate and regionalTargetTimezone.
-                3. Do not use structural markdown elements (like asterisks, headers, lists, or bullets).
-                4. Do not include programmatic labels or sound cues. Deliver text meant strictly for fluid reading.
-                5. Blend schedules, priority alerts, and external metrics naturally.`
-            });
-        } catch (modelErr) {
-            console.log("Primary SDK routing bottleneck encountered. Accessing fallback matrix...");
-            aiResponse = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: `Write a casual daily summary text transcript based on this objective block: ${JSON.stringify(consolidatedData)}. Start strictly with: "Good Morning, Boss." Clear all markdown syntax elements.`
-            });
-        }
+        const briefPrompt = `You are an elite executive chief of staff. Review this raw environment metric: ${JSON.stringify(consolidatedData)}.
+        Compose a human, beautifully structured narrative spoken script. Include email subjects and references clearly.
+        STRICT PROTOCOLS:
+        1. You MUST start the script word-for-word with: "Good Morning, Boss."
+        2. Do not use structural markdown elements. Deliver text meant strictly for fluid reading.`;
+
+        let aiResponse = await generateContentWithRetry(briefPrompt);
 
         const scriptText = aiResponse.text;
-        
         const tts = new MsEdgeTTS();
-        // Force execution strictly under the standard functional US Neural pathing voice asset
         await tts.setMetadata('en-US-AriaNeural', OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
         
         const uniqueSubDirName = `brief-${Date.now()}`;
         const finalTargetDir = path.join(audioCacheDir, uniqueSubDirName);
+        fs.mkdirSync(finalTargetDir, { recursive: true });
         
-        if (!fs.existsSync(finalTargetDir)){
-            fs.mkdirSync(finalTargetDir, { recursive: true });
-        }
-
-        // FIXED PATH BOUNDARY: Pass only the destination directory folder. 
-        // The library will handle adding 'audio.mp3' correctly internally without double path stacking.
-        await tts.toFile(finalTargetDir, scriptText);
+        await compileSpeechWithRetry(tts, finalTargetDir, scriptText);
 
         return res.json({ text: scriptText, streamUrl: `/audio/${uniqueSubDirName}/audio.mp3` });
-
     } catch (pipelineErr) {
         console.error("Pipeline breakdown:", pipelineErr);
         return res.status(500).json({ error: pipelineErr.message });
     }
 });
 
+// --- AGENT INTERACTIVE CONTROLLER ENDPOINT ---
+app.post('/api/agent/chat', async (req, res) => {
+    const email = req.body.email.toLowerCase().trim();
+    const { userCommand } = req.body;
+
+    try {
+        const { data: user, error } = await supabase.from('users').select('*').eq('email', email).single();
+        if (error || !user) return res.status(404).json({ error: "User execution matrix sync missing." });
+
+        const verifiedUserNameSignature = user.name || "Vaishnavi Somarouthu";
+
+        const userAuth = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET);
+        userAuth.setCredentials({ refresh_token: user.google_refresh_token });
+        const gmail = google.gmail({ version: 'v1', auth: userAuth });
+
+        // UNIVERSAL SEARCH BOUNDARY: Grab BOTH recent starred and unstarred records right away
+        const [starredRes, unstarredRes] = await Promise.all([
+            gmail.users.messages.list({ userId: 'me', q: 'is:starred', maxResults: 20 }),
+            gmail.users.messages.list({ userId: 'me', q: '-is:starred', maxResults: 30 })
+        ]);
+
+        let targetInboxContext = [];
+        const combinedMessages = [
+            ...(starredRes.data.messages || []).map(m => ({ ...m, status: 'starred' })),
+            ...(unstarredRes.data.messages || []).map(m => ({ ...m, status: 'unstarred' }))
+        ];
+
+        for (let msg of combinedMessages) {
+            try {
+                const content = await gmail.users.messages.get({ userId: 'me', id: msg.id });
+                const headers = content.data.payload.headers;
+                const subject = (headers.find(h => h.name.toLowerCase() === 'subject') || {}).value || "No Subject";
+                const fromSender = (headers.find(h => h.name.toLowerCase() === 'from') || {}).value || "Unknown Sender";
+                const messageIdHeader = (headers.find(h => h.name.toLowerCase() === 'message-id') || {}).value || "";
+                targetInboxContext.push({ 
+                    id: msg.id, 
+                    threadId: content.data.threadId, 
+                    subject: subject, 
+                    from: fromSender, 
+                    messageIdHeader: messageIdHeader,
+                    status: msg.status
+                });
+            } catch (e) { /* skip single broken entries */ }
+        }
+
+        const commandResolutionPrompt = `You are BriefCase, an elite operational workspace automation agent processing this command: "${userCommand}".
+        Review this live user inbox cache data context matrix containing both starred and unstarred records: ${JSON.stringify(targetInboxContext)}.
+        
+        CRITICAL CORE ACTIONS GUIDE:
+        1. If the user wants to reply to an existing email, identify it from the dataset matrix. If the command also explicitly demands to STAR it first, mark "shouldStarTarget": true.
+        2. If the user wants to star an email without replying, map action to "star".
+        3. If the user wants to compose a fresh email from scratch to an email address mentioned in their prompt (and NOT reply to an existing context item), map action to "compose".
+        
+        CRITICAL SIGNATURE PROTOCOLS:
+        - The account holder's name is strictly: "${verifiedUserNameSignature}".
+        - When generating "replyDraftText", you MUST end the email signature exactly using either "Best regards, ${verifiedUserNameSignature}" or "Warm Regards, ${verifiedUserNameSignature}". Absolutely no other sign-off labels are permitted.
+
+        OUTPUT PROTOCOL: Return ONLY a raw JSON string literal. Do NOT wrap it inside markdown backticks or markdown formatting labels.
+        Format layout exactly:
+        {
+            "action": "reply" or "star" or "unstar" or "compose" or "none",
+            "targetId": "the string message id matched or null",
+            "threadId": "the string thread id matched or null",
+            "recipient": "the email address to send the reply or new email to",
+            "subject": "The email subject line",
+            "messageIdHeader": "the original messageIdHeader value or null",
+            "shouldStarTarget": true or false,
+            "signOffPhrase": "Best regards," or "Warm Regards,",
+            "replyDraftText": "Compose the complete, polished email message body text here. Stop immediately before the sign-off closing. Do NOT add signatures, names, or sign-offs inside this text block.",
+            "agentNarration": "A short, elegant phrase speaking back to the user explaining the exact system action you just triggered."
+        }`;
+
+        let aiResponse = await generateContentWithRetry(commandResolutionPrompt);
+        let resolution = JSON.parse(aiResponse.text.trim());
+
+        // --- PIPELINE OPERATION EXECUTION LAYER ---
+        
+        // Handling explicit pre-star demands or raw star actions
+        if (resolution.action === 'star' || resolution.shouldStarTarget === true) {
+            if (resolution.targetId) {
+                await gmail.users.messages.modify({ userId: 'me', id: resolution.targetId, requestBody: { addLabelIds: ['STARRED'] } });
+                console.log(`✨ Successfully pinned star to message ID: ${resolution.targetId}`);
+            }
+        }
+
+        if (resolution.action === 'unstar') {
+            if (resolution.targetId) {
+                await gmail.users.messages.modify({ userId: 'me', id: resolution.targetId, requestBody: { removeLabelIds: ['STARRED'] } });
+            }
+        }
+
+        // Action routing for Thread Replies OR Brand-New Compositions
+        // Action routing for Thread Replies OR Brand-New Compositions
+        if ((resolution.action === 'reply' || resolution.action === 'compose') && resolution.recipient) {
+            
+            // Forces the signature name exactly below the sign-off phrase with a clean line break newline
+            const pristineSignOff = resolution.signOffPhrase || "Best regards,";
+            const structuralSignatureBlock = `${pristineSignOff}\n${verifiedUserNameSignature}`;
+            
+            const finishedEmailBody = `${resolution.replyDraftText}\n\n${structuralSignatureBlock}\n\n---\n*Automated message from BriefCase. If you feel anything's missing or it's urgent, please reach out directly or reply over here.*`;
+
+            let rawMessageLines = [
+                `To: ${resolution.recipient}`,
+                `Subject: ${resolution.subject}`,
+                `Content-Type: text/plain; charset=utf-8`,
+            ];
+
+            if (resolution.action === 'reply' && resolution.messageIdHeader) {
+                rawMessageLines.push(`In-Reply-To: ${resolution.messageIdHeader}`);
+                rawMessageLines.push(`References: ${resolution.messageIdHeader}`);
+            }
+
+            rawMessageLines.push(``);
+            rawMessageLines.push(finishedEmailBody);
+            
+            const rawEmailString = rawMessageLines.join('\n');
+            const encodedRawEmail = Buffer.from(rawEmailString).toString('base64url');
+
+            await gmail.users.messages.send({
+                userId: 'me',
+                requestBody: {
+                    raw: encodedRawEmail,
+                    threadId: resolution.action === 'reply' ? resolution.threadId : undefined
+                }
+            });
+            console.log(`✉️ Processed mail successfully dispatched to recipient: ${resolution.recipient}`);
+        }
+
+        const tts = new MsEdgeTTS();
+        await tts.setMetadata('en-US-AriaNeural', OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
+        const uniqueSubDirName = `agent-${Date.now()}`;
+        const finalTargetDir = path.join(audioCacheDir, uniqueSubDirName);
+        fs.mkdirSync(finalTargetDir, { recursive: true });
+        
+        await compileSpeechWithRetry(tts, finalTargetDir, resolution.agentNarration);
+
+        return res.json({ text: resolution.agentNarration, streamUrl: `/audio/${uniqueSubDirName}/audio.mp3` });
+    } catch (err) {
+        console.error("Agent interaction loop collapse:", err);
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+// --- BACKGROUND AUTOMATION WORKER (CRON ENGINE) ---
+async function runBackgroundAutoStarWorker() {
+    try {
+        const { data: users } = await supabase.from('users').select('email, google_refresh_token').not('google_refresh_token', 'is', null);
+        if (!users) return;
+
+        for (let user of users) {
+            const { data: rules } = await supabase.from('auto_star_rules').select('*').eq('user_email', user.email);
+            if (!rules || rules.length === 0) continue;
+
+            const userAuth = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET);
+            userAuth.setCredentials({ refresh_token: user.google_refresh_token });
+            const gmail = google.gmail({ version: 'v1', auth: userAuth });
+
+            const recentMessages = await gmail.users.messages.list({ userId: 'me', q: 'is:unread', maxResults: 40 });
+            if (!recentMessages.data.messages) continue;
+
+            const existingLabelsRes = await gmail.users.labels.list({ userId: 'me' });
+            const existingLabels = existingLabelsRes.data.labels || [];
+
+            for (let msg of recentMessages.data.messages) {
+                const content = await gmail.users.messages.get({ userId: 'me', id: msg.id });
+                const headers = content.data.payload.headers;
+                const fromSender = ((headers.find(h => h.name.toLowerCase() === 'from') || {}).value || '').toLowerCase();
+
+                const matchingRule = rules.find(r => fromSender.includes(r.target_sender));
+                if (matchingRule) {
+                    const currentLabels = content.data.labelIds || [];
+                    if (!currentLabels.includes('STARRED')) {
+                        let labelIdToApply = null;
+                        const targetLabelName = matchingRule.custom_label;
+
+                        let foundLabel = existingLabels.find(l => l.name.toLowerCase() === targetLabelName.toLowerCase());
+                        if (!foundLabel) {
+                            try {
+                                const createdLabel = await gmail.users.labels.create({ userId: 'me', requestBody: { name: targetLabelName, labelListVisibility: 'labelShow', messageListVisibility: 'show' } });
+                                labelIdToApply = createdLabel.data.id;
+                                existingLabels.push(createdLabel.data);
+                            } catch (lblErr) {}
+                        } else { labelIdToApply = foundLabel.id; }
+
+                        const modifyPayload = { addLabelIds: ['STARRED'] };
+                        if (labelIdToApply) modifyPayload.addLabelIds.push(labelIdToApply);
+
+                        await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: modifyPayload });
+                        console.log(`✨ Auto-Starred message ID: ${msg.id}`);
+                    }
+                }
+            }
+        }
+    } catch (workerErr) {}
+}
+// LOWERED TO 30 SECONDS FOR FAST EXECUTION SWEEPS
+setInterval(runBackgroundAutoStarWorker, 30000);
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-    console.log("🚀 AuraBrief Core Engine Active on Port " + PORT);
+    console.log(" BriefCase Core Engine Active on Port " + PORT);
     const url = `http://localhost:${PORT}`;
     const startCmd = process.platform === 'win32' ? `start ${url}` : process.platform === 'darwin' ? `open ${url}` : `xdg-open ${url}`;
     exec(startCmd);

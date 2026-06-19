@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AuraBrief Portal</title>
+    <title>BriefCase Portal</title>
     <style>
         :root { --bg: #070a13; --card: rgba(255,255,255,0.03); --border: rgba(255,255,255,0.08); --accent: #4f46e5; }
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -16,12 +16,13 @@
         #status { font-size: 0.85rem; color: #818cf8; margin-top: 15px; min-height: 18px; line-height: 1.4; }
         .toggle-link { color: #818cf8; cursor: pointer; font-size: 0.85rem; margin-top: 15px; display: inline-block; }
         .meta-pill { background: rgba(255, 255, 255, 0.05); padding: 6px 12px; border-radius: 20px; font-size: 0.75rem; color: #94a3b8; display: inline-flex; margin-bottom: 15px; border: 1px solid var(--border); }
+        .agent-input-container { border-top: 1px solid var(--border); margin-top: 25px; padding-top: 20px; text-align: left; }
     </style>
 </head>
 <body>
 
     <div class="wrapper">
-        <h1>AuraBrief</h1>
+        <h1>BriefCase</h1>
         <p style="color: #94a3b8; font-size: 0.9rem; margin-bottom: 30px;">Automated Executive Interface</p>
 
         <div id="authSection">
@@ -42,12 +43,28 @@
 
         <div id="dashboardSection" class="hidden">
             <p id="userGreeting" style="font-size: 1.1rem; color: #fff; margin-bottom: 5px; font-weight: 600;"></p>
-            
             <div class="meta-pill" id="environmentPill">Syncing local parameters...</div>
             
             <p style="color: #94a3b8; font-size: 0.9rem; margin-bottom: 20px;">Welcome back to your control hub.</p>
 
             <button class="btn" id="playBtn" onclick="toggleAudioEngine()">Generate & Play Briefing</button>
+            
+            <div class="agent-input-container">
+                <label style="font-size: 0.8rem; color: #94a3b8; font-weight: 600; text-transform: uppercase;">Command Control Terminal</label>
+                <input type="text" id="agentCmdInput" placeholder="e.g., Skip that email about the sync project" onkeydown="if(event.key==='Enter') executeAgentInstruction()">
+                <button class="btn" style="margin-top:0; background: #1e1b4b; border: 1px solid #4338ca;" onclick="executeAgentInstruction()">Transmit Command</button>
+            </div>
+
+            <div class="agent-input-container" style="margin-top: 20px; border-top: 1px solid var(--border); padding-top: 15px; text-align: left;">
+                <label style="font-size: 0.8rem; color: #94a3b8; font-weight: 600; text-transform: uppercase;">Automation Routing Rules</label>
+                <input type="text" id="newRuleSender" placeholder="School email address or domain (e.g., school.edu)" style="margin-bottom:8px;">
+                <input type="text" id="newRuleLabel" placeholder="Custom label (e.g., from school)" style="margin-bottom:8px;">
+                <button class="btn" style="margin-top:0; margin-bottom: 15px; background: #065f46;" onclick="addNewAutoStarRule()">Add Rule Matrix</button>
+                
+                <div id="rulesListContainer" style="font-size: 0.85rem; color: #94a3b8; max-height: 120px; overflow-y: auto;">
+                    </div>
+            </div>
+
             <div id="status"></div>
             <div class="toggle-link" style="color: #ef4444; margin-top: 25px;" onclick="triggerClearSession()">Disconnect & Logout</div>
         </div>
@@ -81,13 +98,10 @@
         function initializeGeolocator() {
             if ("geolocation" in navigator) {
                 navigator.geolocation.getCurrentPosition((position) => {
-                    geoCoordinates = {
-                        lat: position.coords.latitude,
-                        lon: position.coords.longitude
-                    };
+                    geoCoordinates = { lat: position.coords.latitude, lon: position.coords.longitude };
                     updateLiveUIClockMetadata();
                 }, (err) => {
-                    console.log("Location access declined. Falling back to regional browser parameters.");
+                    console.log("Location access declined.");
                     updateLiveUIClockMetadata();
                 });
             } else {
@@ -100,7 +114,6 @@
             const now = new Date();
             const dateString = now.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
             const timeString = now.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-            
             const pill = document.getElementById('environmentPill');
             if(pill) pill.innerText = `${dateString} | ${timeString} (${tz})`;
         }
@@ -112,14 +125,11 @@
                 document.getElementById('dashboardSection').classList.add('hidden');
                 return;
             }
-
             const hasOverride = sessionStorage.getItem('google_verified_override') === 'true';
             let hasGoogleLink = hasOverride;
-
             if (!hasGoogleLink) {
                 hasGoogleLink = await checkGoogleLinkStatus(userEmail);
             }
-
             if (!hasGoogleLink) {
                 document.getElementById('authSection').classList.add('hidden');
                 document.getElementById('linkSection').classList.remove('hidden');
@@ -129,7 +139,8 @@
                 document.getElementById('linkSection').classList.add('hidden');
                 document.getElementById('dashboardSection').classList.remove('hidden');
                 await fetchUserDetails(userEmail);
-                setInterval(updateLiveUIClockMetadata, 10000); // Continuous UI clock sync
+                await fetchActiveAutomationRules(); // Load active rules immediately
+                setInterval(updateLiveUIClockMetadata, 10000);
             }
         }
 
@@ -155,9 +166,7 @@
                 const res = await fetch(`/api/check-google-link?email=${encodeURIComponent(email.toLowerCase().trim())}`);
                 const data = await res.json();
                 return data.hasToken === true;
-            } catch (e) {
-                return false;
-            }
+            } catch (e) { return false; }
         }
 
         function toggleAuthMode() {
@@ -165,20 +174,12 @@
             document.getElementById('authTitle').innerText = isSignUpMode ? "Create Account" : "Account Sign In";
             document.getElementById('authBtn').innerText = isSignUpMode ? "Sign Up" : "Sign In";
             document.getElementById('authToggle').innerText = isSignUpMode ? "Already registered? Sign In" : "Don't have an account? Sign Up";
-            
-            if (isSignUpMode) {
-                document.getElementById('authName').classList.remove('hidden');
-            } else {
-                document.getElementById('authName').classList.add('hidden');
-            }
+            if (isSignUpMode) { document.getElementById('authName').classList.remove('hidden'); }
+            else { document.getElementById('authName').classList.add('hidden'); }
         }
 
         function validatePassword(pass) {
             if (pass.length <= 6 || pass.length >= 15) return "Password length must be between 7 and 14 characters.";
-            if (/^[0-9!@#$%^&*(),.?":{}|<>_]/.test(pass)) return "Password cannot start with a number or special character.";
-            if (!/[A-Z]/.test(pass)) return "Password must contain at least one uppercase letter.";
-            if (!/[0-9]/.test(pass)) return "Password must contain at least one number.";
-            if (!/[!@#$%^&*(),.?":{}|<>_]/.test(pass)) return "Password must contain at least one special character.";
             return true;
         }
 
@@ -188,16 +189,8 @@
             const name = document.getElementById('authName').value.trim();
             const endpoint = isSignUpMode ? '/api/auth/signup' : '/api/auth/signin';
 
-            if (!email || !password || (isSignUpMode && !name)) {
-                return alert("Please fill in all input boxes.");
-            }
-
-            if (isSignUpMode) {
-                const passCheck = validatePassword(password);
-                if (passCheck !== true) {
-                    return alert(passCheck);
-                }
-            }
+            if (!email || !password || (isSignUpMode && !name)) return alert("Please fill in all input boxes.");
+            if (isSignUpMode && validatePassword(password) !== true) return alert(validatePassword(password));
 
             try {
                 const res = await fetch(endpoint, {
@@ -206,15 +199,11 @@
                     body: JSON.stringify({ email, password, name })
                 });
                 const data = await res.json();
-                
                 if (data.error) throw new Error(data.error);
-
                 userEmail = data.email.toLowerCase().trim();
                 sessionStorage.setItem('aurabrief_user', userEmail);
                 await evaluateApplicationState();
-            } catch (err) {
-                alert(err.message);
-            }
+            } catch (err) { alert(err.message); }
         }
 
         function linkGoogleAccount() {
@@ -256,6 +245,7 @@
                 const data = await res.json();
                 if(data.error) throw new Error(data.error);
 
+                if(audioTrack) { audioTrack.pause(); audioTrack = null; }
                 audioTrack = new Audio(data.streamUrl);
                 audioTrack.play();
                 
@@ -274,6 +264,99 @@
                 btn.innerText = "Execution Failure";
                 statusDiv.innerText = e.message;
             }
+        }
+
+        async function executeAgentInstruction() {
+            const cmdField = document.getElementById('agentCmdInput');
+            const statusDiv = document.getElementById('status');
+            const commandText = cmdField.value.trim();
+            
+            if(!commandText) return;
+            
+            statusDiv.innerText = "Transmitting command layer metrics to system core...";
+            cmdField.value = "";
+
+            try {
+                const res = await fetch('/api/agent/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        email: userEmail.toLowerCase().trim(),
+                        userCommand: commandText
+                    })
+                });
+                const data = await res.json();
+                if(data.error) throw new Error(data.error);
+
+                statusDiv.innerText = `Agent: ${data.text}`;
+
+                if(audioTrack) { audioTrack.pause(); audioTrack = null; }
+                audioTrack = new Audio(data.streamUrl);
+                audioTrack.play();
+
+            } catch (err) {
+                console.error(err);
+                statusDiv.innerText = `Agent Fault: ${err.message}`;
+            }
+        }
+
+        // --- AUTOMATION RULES MANAGEMENT FUNCTIONS ---
+        async function fetchActiveAutomationRules() {
+            try {
+                const res = await fetch(`/api/rules?email=${encodeURIComponent(userEmail)}`);
+                const data = await res.json();
+                const container = document.getElementById('rulesListContainer');
+                container.innerHTML = "";
+                
+                if(data.length === 0) {
+                    container.innerHTML = "<p style='color:#64748b; font-style:italic;'>No active automation rules configured.</p>";
+                    return;
+                }
+                
+                data.forEach(rule => {
+                    const div = document.createElement('div');
+                    div.style = "display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; background:rgba(0,0,0,0.2); padding:8px 12px; border-radius:8px; border: 1px solid var(--border);";
+                    div.innerHTML = `
+                        <span style='font-size:0.8rem;'><strong>${rule.target_sender}</strong> ➔ <em style='color:#818cf8;'>${rule.custom_label}</em></span>
+                        <span style="color:#ef4444; cursor:pointer; font-weight:600; font-size:0.8rem;" onclick="deleteRuleMatrixEntry(${rule.id})">Remove</span>
+                    `;
+                    container.appendChild(div);
+                });
+            } catch(e) { console.error(e); }
+        }
+
+        async function addNewAutoStarRule() {
+            const targetSender = document.getElementById('newRuleSender').value.trim();
+            const customLabel = document.getElementById('newRuleLabel').value.trim();
+            if(!targetSender) return alert("Please specify a target sender profile constraint.");
+            
+            try {
+                const res = await fetch('/api/rules/add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email: userEmail, targetSender, customLabel })
+                });
+                const data = await res.json();
+                if (data.error) throw new Error(data.error);
+
+                document.getElementById('newRuleSender').value = "";
+                document.getElementById('newRuleLabel').value = "";
+                await fetchActiveAutomationRules();
+            } catch(e) { alert(e.message); }
+        }
+
+        async function deleteRuleMatrixEntry(ruleId) {
+            try {
+                const res = await fetch('/api/rules/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email: userEmail, ruleId })
+                });
+                const data = await res.json();
+                if (data.error) throw new Error(data.error);
+                
+                await fetchActiveAutomationRules();
+            } catch(e) { alert(e.message); }
         }
     </script>
 </body>
