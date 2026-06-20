@@ -20,10 +20,15 @@ if (!fs.existsSync(audioCacheDir)){
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
+// Automatically toggles the callback target based on the deployment environment
+const productionURL = process.env.NODE_ENV === 'production' 
+    ? 'https://briefcase-nqsy.onrender.com/auth/google/callback' 
+    : 'http://localhost:5000/auth/google/callback';
+
 const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
-    'http://localhost:5000/auth/google/callback'
+    productionURL
 );
 
 // Helper function to process TTS with an inline retry mechanism
