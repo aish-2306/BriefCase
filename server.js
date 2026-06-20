@@ -153,7 +153,7 @@ app.get('/auth/google/callback', async (req, res) => {
     }
 });
 
-// --- CORE PIPELINE AUDIO AUTOMATION GENERATOR ---
+// --- CORE PIPELINE AUDIO AUTOMATION GENERATOR (WITH DUP FILTERING) ---
 app.post('/api/generate-brief', async (req, res) => {
     const email = req.body.email.toLowerCase().trim();
     const { userTimezone, deviceClock, geoCoordinates } = req.body;
@@ -171,7 +171,7 @@ app.post('/api/generate-brief', async (req, res) => {
                 if (weatherData && weatherData.current_weather) {
                     spatialWeatherResult = `${weatherData.current_weather.temperature}°C with a local wind speed of ${weatherData.current_weather.windspeed} km/h.`;
                 }
-            } catch (wErr) { console.log("Weather parsing cascaded gracefully."); }
+            } catch (wErr) {}
         }
 
         const userAuth = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET);
@@ -184,19 +184,33 @@ app.post('/api/generate-brief', async (req, res) => {
         const endOfDay = new Date(deviceClock);
         endOfDay.setHours(23, 59, 59, 999);
 
+        // Fetch user's read log history matrix from Supabase storage layer
+        const { data: readLogs } = await supabase.from('read_briefing_logs').select('message_id').eq('user_email', email);
+        const prohibitedIds = (readLogs || []).map(log => log.message_id);
+
         const [calendarData, gmailData] = await Promise.all([
             calendar.events.list({ calendarId: 'primary', timeMin: localNow.toISOString(), timeMax: endOfDay.toISOString(), singleEvents: true, orderBy: 'startTime' }),
-            gmail.users.messages.list({ userId: 'me', q: 'is:starred', maxResults: 3 })
+            gmail.users.messages.list({ userId: 'me', q: 'is:starred', maxResults: 15 })
         ]);
 
         let customPriorityEmails = [];
+        let freshLoggedIds = [];
+
         if (gmailData.data.messages) {
             for (let msg of gmailData.data.messages) {
+                // FILTER PROTOCOL: Skip this entry entirely if it was already announced in an earlier briefing stream
+                if (prohibitedIds.includes(msg.id)) continue;
+
                 const content = await gmail.users.messages.get({ userId: 'me', id: msg.id });
                 const headers = content.data.payload.headers;
                 const subjectHeader = headers.find(h => h.name.toLowerCase() === 'subject');
                 const subject = subjectHeader ? subjectHeader.value : "No Subject";
+                
                 customPriorityEmails.push({ id: msg.id, subject: subject, snippet: content.data.snippet });
+                freshLoggedIds.push(msg.id);
+                
+                // Keep the briefing digest short (top 3 unread starred items)
+                if (customPriorityEmails.length >= 3) break;
             }
         }
 
@@ -206,31 +220,36 @@ app.post('/api/generate-brief', async (req, res) => {
             return `${item.summary} starting exactly at ${formattedTime}`;
         });
 
+        // Context check: If there are zero new emails, instruct the AI smoothly so it doesn't hallucinate old data
         const consolidatedData = {
             currentTimeAndDate: deviceClock,
             regionalTargetTimezone: userTimezone,
             currentWeatherMetrics: spatialWeatherResult,
             calendar: synchronizedCalendarEvents,
-            starredInboxSnippets: customPriorityEmails,
-            whatsappAlerts: user.whatsapp_snippet
+            starredInboxSnippets: customPriorityEmails
         };
 
         const briefPrompt = `You are an elite executive chief of staff. Review this raw environment metric: ${JSON.stringify(consolidatedData)}.
-        Compose a human, beautifully structured narrative spoken script. Include email subjects and references clearly.
+        Compose a short spoken update. If starredInboxSnippets is completely empty, warmly inform the user that there are no new unread priority updates since their last briefing check.
         STRICT PROTOCOLS:
         1. You MUST start the script word-for-word with: "Good Morning, Boss."
-        2. Do not use structural markdown elements. Deliver text meant strictly for fluid reading.`;
+        2. Do not use structural markdown elements or markdown bullets.`;
 
         let aiResponse = await generateContentWithRetry(briefPrompt);
-
         const scriptText = aiResponse.text;
+
+        // Atomic write: Commit newly processed message IDs to database history logs so they are locked out next time
+        if (freshLoggedIds.length > 0) {
+            const batchLogs = freshLoggedIds.map(id => ({ user_email: email, message_id: id }));
+            await supabase.from('read_briefing_logs').insert(batchLogs);
+        }
+
         const tts = new MsEdgeTTS();
         await tts.setMetadata('en-US-AriaNeural', OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
         
         const uniqueSubDirName = `brief-${Date.now()}`;
         const finalTargetDir = path.join(audioCacheDir, uniqueSubDirName);
         fs.mkdirSync(finalTargetDir, { recursive: true });
-        
         await compileSpeechWithRetry(tts, finalTargetDir, scriptText);
 
         return res.json({ text: scriptText, streamUrl: `/audio/${uniqueSubDirName}/audio.mp3` });
@@ -439,9 +458,6 @@ async function runBackgroundAutoStarWorker() {
 setInterval(runBackgroundAutoStarWorker, 30000);
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-    console.log(" BriefCase Core Engine Active on Port " + PORT);
-    const url = `http://localhost:${PORT}`;
-    const startCmd = process.platform === 'win32' ? `start ${url}` : process.platform === 'darwin' ? `open ${url}` : `xdg-open ${url}`;
-    exec(startCmd);
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(" BriefCase Production Engine Active on Port " + PORT);
 });
