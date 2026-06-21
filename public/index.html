@@ -84,7 +84,7 @@
             const emailParam = params.get('email');
             const googleLinkedParam = params.get('google_linked');
             
-            // Catch the credentials from the URL coming back from the server
+            // Catch the credentials from the URL coming back from the server redirection
             if (successParam === 'true' && emailParam) {
                 userEmail = emailParam.toLowerCase().trim();
                 localStorage.setItem('aurabrief_user', userEmail);
@@ -128,7 +128,7 @@
         }
 
         async function evaluateApplicationState() {
-            // Flow Point 1: If email is missing, show Sign In / Register Page
+            // FLOW POINT 1: If email is missing, show Sign In / Register Page
             if (!userEmail) {
                 document.getElementById('authSection').classList.remove('hidden');
                 document.getElementById('linkSection').classList.add('hidden');
@@ -140,21 +140,25 @@
             const hasOverride = localStorage.getItem('google_verified_override') === 'true';
             let hasGoogleLink = hasOverride;
             
+            // If there is no immediate local override flag, check the remote database fallback
             if (!hasGoogleLink) {
                 hasGoogleLink = await checkGoogleLinkStatus(userEmail);
             }
             
             if (hasGoogleLink) {
-                // Flow Point 3: Land directly onto the generating page dashboard
+                // FLOW POINT 3: Land directly onto the generating page dashboard view
                 document.getElementById('authSection').classList.add('hidden');
                 document.getElementById('linkSection').classList.add('hidden');
                 document.getElementById('dashboardSection').classList.remove('hidden');
                 
                 await fetchUserDetails(userEmail);
                 await fetchActiveAutomationRules(); 
+                
+                // Clear any single-use override flags so subsequent hard reloads pull pure db states
+                localStorage.removeItem('google_verified_override');
                 setInterval(updateLiveUIClockMetadata, 10000);
             } else {
-                // Flow Point 2: Send logged-in users who lack a Google Link to the Connect Workspace Page
+                // FLOW POINT 2: Send logged-in users who lack a Google Link to the Connect Workspace Page
                 document.getElementById('authSection').classList.add('hidden');
                 document.getElementById('linkSection').classList.remove('hidden');
                 document.getElementById('dashboardSection').classList.add('hidden');
@@ -217,6 +221,10 @@
                 });
                 const data = await res.json();
                 if (data.error) throw new Error(data.error);
+                
+                // Clear out stale historical tokens before establishing the fresh user identity layout
+                localStorage.clear();
+                
                 userEmail = data.email.toLowerCase().trim();
                 localStorage.setItem('aurabrief_user', userEmail);
                 await evaluateApplicationState();
