@@ -82,32 +82,61 @@
             const successParam = params.get('login_success');
             const emailParam = params.get('email');
             const googleLinkedParam = params.get('google_linked');
-            const errorParam = params.get('login_error');
-            const errorMsg = params.get('message');
             
-            if (errorParam === 'true') {
-                alert("Google Workspace Linkage Failed: " + errorMsg);
-                window.history.replaceState({}, document.title, "/");
-            }
-            
+            // 1. Instantly check if we are returning from a successful Google auth redirect
             if (successParam === 'true' && emailParam) {
                 userEmail = emailParam.toLowerCase().trim();
-                localStorage.setItem('aurabrief_user', userEmail);
+                sessionStorage.setItem('aurabrief_user', userEmail);
                 
                 if (googleLinkedParam === 'true') {
-                    localStorage.setItem('google_verified_override', 'true');
+                    sessionStorage.setItem('google_verified_override', 'true');
                 }
-                
-                window.history.replaceState({}, document.title, "/");
             } else {
-                userEmail = localStorage.getItem('aurabrief_user');
+                // Otherwise, pull the existing session cleanly
+                userEmail = sessionStorage.getItem('aurabrief_user');
             }
             
-            // FIXED: Evaluate application state FIRST to lock the layout elements down 
-            // before firing asynchronous browser hardware telemetry streams.
-            await evaluateApplicationState();
             initializeGeolocator();
+            
+            // 2. Run the UI toggle evaluation FIRST while the URL parameters are strictly present
+            await evaluateApplicationState();
+
+            // 3. NOW clean the URL bar cleanly after the UI has already shifted safely to the dashboard
+            if (successParam === 'true') {
+                window.history.replaceState({}, document.title, "/");
+            }
         };
+
+        async function evaluateApplicationState() {
+            if (!userEmail) {
+                document.getElementById('authSection').classList.remove('hidden');
+                document.getElementById('linkSection').classList.add('hidden');
+                document.getElementById('dashboardSection').classList.add('hidden');
+                return;
+            }
+
+            const hasOverride = sessionStorage.getItem('google_verified_override') === 'true';
+            let hasGoogleLink = hasOverride;
+            
+            if (!hasGoogleLink) {
+                hasGoogleLink = await checkGoogleLinkStatus(userEmail);
+            }
+            
+            if (hasGoogleLink) {
+                // Lock the dashboard visible immediately
+                document.getElementById('authSection').classList.add('hidden');
+                document.getElementById('linkSection').classList.add('hidden');
+                document.getElementById('dashboardSection').classList.remove('hidden');
+                
+                await fetchUserDetails(userEmail);
+                await fetchActiveAutomationRules(); 
+                setInterval(updateLiveUIClockMetadata, 10000);
+            } else {
+                document.getElementById('authSection').classList.add('hidden');
+                document.getElementById('linkSection').classList.remove('hidden');
+                document.getElementById('dashboardSection').classList.add('hidden');
+            }
+        }
 
         function initializeGeolocator() {
             if ("geolocation" in navigator) {
@@ -133,43 +162,7 @@
         }
 
         // FIXED: Clean synchronized UI rendering state machine protecting views from latency drops
-        async function evaluateApplicationState() {
-            // FLOW POINT 1: If email is missing entirely, show Sign In / Register Page
-            if (!userEmail) {
-                document.getElementById('authSection').classList.remove('hidden');
-                document.getElementById('linkSection').classList.add('hidden');
-                document.getElementById('dashboardSection').classList.add('hidden');
-                return;
-            }
-
-            // Trust the explicit gateway override page indicator first
-            const hasOverride = localStorage.getItem('google_verified_override') === 'true';
-            let hasGoogleLink = hasOverride;
-            
-            // Validate against the database connection matrix
-            if (!hasGoogleLink) {
-                hasGoogleLink = await checkGoogleLinkStatus(userEmail);
-            }
-            
-            if (hasGoogleLink) {
-                // FLOW POINT 3: Land directly onto the generating dashboard control hub
-                document.getElementById('authSection').classList.add('hidden');
-                document.getElementById('linkSection').classList.add('hidden');
-                document.getElementById('dashboardSection').classList.remove('hidden');
-                
-                await fetchUserDetails(userEmail);
-                await fetchActiveAutomationRules(); 
-                
-                // Keep the state securely set for active users
-                setInterval(updateLiveUIClockMetadata, 10000);
-            } else {
-                // FLOW POINT 2: Only route here if they are a validated active session user 
-                // who explicitly needs to complete their data link profile step.
-                document.getElementById('authSection').classList.add('hidden');
-                document.getElementById('linkSection').classList.remove('hidden');
-                document.getElementById('dashboardSection').classList.add('hidden');
-            }
-        }
+       
 
         // FIXED: Flushes historical variables cleanly on explicit action request loops
         function triggerClearSession() {
