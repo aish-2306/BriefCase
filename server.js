@@ -134,7 +134,7 @@ app.get('/auth/google', (req, res) => {
         access_type: 'offline',
         prompt: 'consent',
         state: userEmailState,
-        scope = [
+        scope : [
             'https://www.googleapis.com/auth/calendar.readonly', 
             'https://www.googleapis.com/auth/gmail.modify', 
             'https://www.googleapis.com/auth/calendar.events',
