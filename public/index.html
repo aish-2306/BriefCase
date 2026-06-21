@@ -86,37 +86,16 @@
                 userEmail = emailParam.toLowerCase().trim();
                 sessionStorage.setItem('aurabrief_user', userEmail);
                 if (googleLinkedParam === 'true') {
+                    // Force set this explicitly to guarantee state persistence across the redirect
                     sessionStorage.setItem('google_verified_override', 'true');
                 }
+                // Cleans the parameters out of the address bar
                 window.history.replaceState({}, document.title, "/");
             }
             
             initializeGeolocator();
             await evaluateApplicationState();
         };
-
-        function initializeGeolocator() {
-            if ("geolocation" in navigator) {
-                navigator.geolocation.getCurrentPosition((position) => {
-                    geoCoordinates = { lat: position.coords.latitude, lon: position.coords.longitude };
-                    updateLiveUIClockMetadata();
-                }, (err) => {
-                    console.log("Location access declined.");
-                    updateLiveUIClockMetadata();
-                });
-            } else {
-                updateLiveUIClockMetadata();
-            }
-        }
-
-        function updateLiveUIClockMetadata() {
-            const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-            const now = new Date();
-            const dateString = now.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
-            const timeString = now.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-            const pill = document.getElementById('environmentPill');
-            if(pill) pill.innerText = `${dateString} | ${timeString} (${tz})`;
-        }
 
         async function evaluateApplicationState() {
             if (!userEmail) {
@@ -125,11 +104,16 @@
                 document.getElementById('dashboardSection').classList.add('hidden');
                 return;
             }
+
+            // CHECK OVERRIDE FIRST: If she just returned from a successful OAuth redirect loop,
+            // skip the database polling call entirely to avoid server write timing latency issues.
             const hasOverride = sessionStorage.getItem('google_verified_override') === 'true';
             let hasGoogleLink = hasOverride;
+            
             if (!hasGoogleLink) {
                 hasGoogleLink = await checkGoogleLinkStatus(userEmail);
             }
+            
             if (!hasGoogleLink) {
                 document.getElementById('authSection').classList.add('hidden');
                 document.getElementById('linkSection').classList.remove('hidden');
@@ -139,7 +123,7 @@
                 document.getElementById('linkSection').classList.add('hidden');
                 document.getElementById('dashboardSection').classList.remove('hidden');
                 await fetchUserDetails(userEmail);
-                await fetchActiveAutomationRules(); // Load active rules immediately
+                await fetchActiveAutomationRules(); 
                 setInterval(updateLiveUIClockMetadata, 10000);
             }
         }
