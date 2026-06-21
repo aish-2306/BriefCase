@@ -134,6 +134,7 @@
 
         // FIXED: Clean synchronized UI rendering state machine protecting views from latency drops
         async function evaluateApplicationState() {
+            // FLOW POINT 1: If email is missing entirely, show Sign In / Register Page
             if (!userEmail) {
                 document.getElementById('authSection').classList.remove('hidden');
                 document.getElementById('linkSection').classList.add('hidden');
@@ -141,14 +142,17 @@
                 return;
             }
 
+            // Trust the explicit gateway override page indicator first
             const hasOverride = localStorage.getItem('google_verified_override') === 'true';
             let hasGoogleLink = hasOverride;
             
+            // Validate against the database connection matrix
             if (!hasGoogleLink) {
                 hasGoogleLink = await checkGoogleLinkStatus(userEmail);
             }
             
             if (hasGoogleLink) {
+                // FLOW POINT 3: Land directly onto the generating dashboard control hub
                 document.getElementById('authSection').classList.add('hidden');
                 document.getElementById('linkSection').classList.add('hidden');
                 document.getElementById('dashboardSection').classList.remove('hidden');
@@ -156,9 +160,11 @@
                 await fetchUserDetails(userEmail);
                 await fetchActiveAutomationRules(); 
                 
-                // FIXED: Removed premature override clearing to secure view permanence across app re-draws
+                // Keep the state securely set for active users
                 setInterval(updateLiveUIClockMetadata, 10000);
             } else {
+                // FLOW POINT 2: Only route here if they are a validated active session user 
+                // who explicitly needs to complete their data link profile step.
                 document.getElementById('authSection').classList.add('hidden');
                 document.getElementById('linkSection').classList.remove('hidden');
                 document.getElementById('dashboardSection').classList.add('hidden');
