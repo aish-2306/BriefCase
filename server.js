@@ -20,10 +20,10 @@ if (!fs.existsSync(audioCacheDir)){
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// Automatically toggles the callback target based on the deployment environment
+// Using your pure, flat Single Page live URL for the production target
 const productionURL = process.env.NODE_ENV === 'production' 
-    ? 'https://briefcase-nqsy.onrender.com/auth/google/callback' 
-    : 'http://localhost:5000/auth/google/callback';
+    ? 'https://briefcase-nqsy.onrender.com' 
+    : 'http://localhost:5000';
 
 const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
@@ -127,7 +127,7 @@ app.post('/api/rules/delete', async (req, res) => {
     return res.json({ success: true });
 });
 
-// --- GOOGLE OAUTH INTERSECT LINKAGE ---
+// --- GOOGLE OAUTH INTERSECT LINKAGE START ---
 app.get('/auth/google', (req, res) => {
     const userEmailState = req.query.email.toLowerCase().trim();
     const url = oauth2Client.generateAuthUrl({
@@ -144,17 +144,28 @@ app.get('/auth/google', (req, res) => {
     res.redirect(url);
 });
 
-app.get('/auth/google/callback', async (req, res) => {
+// UNIFIED SINGLE PAGE ROUTE: Handles rendering AND OAuth data catch routines on the exact same URL
+app.get('/', async (req, res) => {
     const { code, state } = req.query;
-    const targetEmail = state.toLowerCase().trim();
+
+    // If there is no OAuth authorization code in the URL parameters, simply serve your index interface file right away
+    if (!code) {
+        return res.sendFile(path.join(__dirname, 'public', 'index.html')); 
+    }
+
+    // If a code exists, process the background token exchange sequence
+    const targetEmail = state ? state.toLowerCase().trim() : '';
     try {
         const { tokens } = await oauth2Client.getToken(code);
-        const { error } = await supabase.from('users').upsert({ email: targetEmail, google_refresh_token: tokens.refresh_token }, { onConflict: 'email' });
-        if (error) throw error;
-        res.redirect(`/?login_success=true&email=${encodeURIComponent(targetEmail)}&google_linked=true`);
+        if (targetEmail) {
+            await supabase.from('users').upsert({ email: targetEmail, google_refresh_token: tokens.refresh_token }, { onConflict: 'email' });
+        }
+        // Redirect right back to the root landing state cleanly to scrub the ugly query parameters out of your address bar
+        return res.redirect(`/?login_success=true&email=${encodeURIComponent(targetEmail)}&google_linked=true`);
     } catch (err) {
         console.error("Auth Linkage failure:", err);
-        res.status(500).send("Verification alignment break.");
+        // Fallback safely to show your app interface if something stumbles during the parameter exchange
+        return res.sendFile(path.join(__dirname, 'public', 'index.html'));
     }
 });
 
@@ -340,8 +351,6 @@ app.post('/api/agent/chat', async (req, res) => {
         let resolution = JSON.parse(aiResponse.text.trim());
 
         // --- PIPELINE OPERATION EXECUTION LAYER ---
-        
-        // Handling explicit pre-star demands or raw star actions
         if (resolution.action === 'star' || resolution.shouldStarTarget === true) {
             if (resolution.targetId) {
                 await gmail.users.messages.modify({ userId: 'me', id: resolution.targetId, requestBody: { addLabelIds: ['STARRED'] } });
@@ -355,11 +364,7 @@ app.post('/api/agent/chat', async (req, res) => {
             }
         }
 
-        // Action routing for Thread Replies OR Brand-New Compositions
-        // Action routing for Thread Replies OR Brand-New Compositions
         if ((resolution.action === 'reply' || resolution.action === 'compose') && resolution.recipient) {
-            
-            // Forces the signature name exactly below the sign-off phrase with a clean line break newline
             const pristineSignOff = resolution.signOffPhrase || "Best regards,";
             const structuralSignatureBlock = `${pristineSignOff}\n${verifiedUserNameSignature}`;
             
@@ -459,7 +464,6 @@ async function runBackgroundAutoStarWorker() {
         }
     } catch (workerErr) {}
 }
-// LOWERED TO 30 SECONDS FOR FAST EXECUTION SWEEPS
 setInterval(runBackgroundAutoStarWorker, 30000);
 
 const PORT = process.env.PORT || 5000;
