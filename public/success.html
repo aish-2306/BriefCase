@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Authenticating Session...</title>
+    <style>
+        body { background: #070a13; color: #818cf8; font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+        .loader { text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="loader">
+        <h2>Securing Workspace Core...</h2>
+        <p style="color: #94a3b8;">Finalizing token integration parameters safely.</p>
+    </div>
+
+    <script>
+        // Securely capture the parameters on a completely separate, non-looping page
+        const params = new URLSearchParams(window.location.search);
+        const emailParam = params.get('email');
+        const googleLinked = params.get('google_linked');
+
+        if (emailParam && googleLinked === 'true') {
+            // Lock the state into place synchronously before touching the home domain view
+            localStorage.setItem('aurabrief_user', emailParam.toLowerCase().trim());
+            localStorage.setItem('google_verified_override', 'true');
+        }
+
+        // Push clean execution over to the home dashboard
+        window.location.href = "/";
+    </script>
+</body>
+</html>

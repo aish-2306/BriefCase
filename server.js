@@ -145,6 +145,7 @@ app.get('/auth/google', (req, res) => {
 });
 
 // FIXED: Main SPA entry point now explicitly redirects with error queries instead of masking bugs
+// UNIFIED SPA MAIN ROUTE: Intercepts code parameters and cleans them dynamically
 app.get('/', async (req, res) => {
     const { code, state } = req.query;
 
@@ -161,10 +162,10 @@ app.get('/', async (req, res) => {
                 { onConflict: 'email' }
             );
         }
-        return res.redirect(`/?login_success=true&email=${encodeURIComponent(targetEmail)}&google_linked=true`);
+        // FIXED: Redirect straight to success.html to separate the handshake from the landing logic
+        return res.redirect(`/success.html?email=${encodeURIComponent(targetEmail)}&google_linked=true`);
     } catch (err) {
         console.error("Auth Linkage failure:", err);
-        // FIXED: Explicitly passes error feedback down to client interface prevents loop deadlocks
         return res.redirect(`/?login_error=true&message=${encodeURIComponent(err.message)}`);
     }
 });
