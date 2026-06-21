@@ -163,8 +163,8 @@ app.get('/', async (req, res) => {
             );
         }
         
-        // Fixed: Redirects directly back to the root SPA path with the flags your index.html needs
-        return res.redirect(`/?login_success=true&email=${encodeURIComponent(targetEmail)}&google_linked=true`);
+        // Passing both email and state parameters guarantees the front-end interceptor reads it cleanly
+        return res.redirect(`/?login_success=true&email=${encodeURIComponent(targetEmail)}&state=${encodeURIComponent(targetEmail)}&google_linked=true`);
     } catch (err) {
         console.error("Auth Linkage failure:", err);
         return res.redirect(`/?login_error=true&message=${encodeURIComponent(err.message)}`);
