@@ -77,7 +77,7 @@
         let userEmail = localStorage.getItem('aurabrief_user');
         let geoCoordinates = null;
 
-        window.onload = async () => {
+       window.onload = async () => {
             const params = new URLSearchParams(window.location.search);
             const successParam = params.get('login_success');
             const emailParam = params.get('email');
@@ -85,7 +85,6 @@
             const errorParam = params.get('login_error');
             const errorMsg = params.get('message');
             
-            // FIXED: Instantly triggers alerts if backend logs an explicit handshake fail condition
             if (errorParam === 'true') {
                 alert("Google Workspace Linkage Failed: " + errorMsg);
                 window.history.replaceState({}, document.title, "/");
@@ -104,8 +103,10 @@
                 userEmail = localStorage.getItem('aurabrief_user');
             }
             
-            initializeGeolocator();
+            // FIXED: Evaluate application state FIRST to lock the layout elements down 
+            // before firing asynchronous browser hardware telemetry streams.
             await evaluateApplicationState();
+            initializeGeolocator();
         };
 
         function initializeGeolocator() {
