@@ -148,12 +148,10 @@ app.get('/auth/google', (req, res) => {
 app.get('/', async (req, res) => {
     const { code, state } = req.query;
 
-    // If no authorization parameter code exists, serve the main landing view right away
     if (!code) {
         return res.sendFile(path.join(__dirname, 'public', 'index.html')); 
     }
 
-    // If an incoming code parameter exists, handle the background data write sequence
     const targetEmail = state ? state.toLowerCase().trim() : '';
     try {
         const { tokens } = await oauth2Client.getToken(code);
@@ -163,8 +161,6 @@ app.get('/', async (req, res) => {
                 { onConflict: 'email' }
             );
         }
-        
-        // RECTIFICATION 1: We redirect explicitly back with a unified parameter list matching what the frontend expects
         return res.redirect(`/?login_success=true&email=${encodeURIComponent(targetEmail)}&google_linked=true`);
     } catch (err) {
         console.error("Auth Linkage failure:", err);

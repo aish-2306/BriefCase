@@ -73,7 +73,9 @@
     <script>
         let audioTrack = null;
         let isSignUpMode = false;
-        let userEmail = sessionStorage.getItem('aurabrief_user');
+        
+        // Use localStorage so the session survives cross-domain redirection perfectly
+        let userEmail = localStorage.getItem('aurabrief_user');
         let geoCoordinates = null;
 
         window.onload = async () => {
@@ -82,28 +84,51 @@
             const emailParam = params.get('email');
             const googleLinkedParam = params.get('google_linked');
             
-            // Catch the credentials from the URL if returning from Google
+            // Catch the credentials from the URL coming back from the server
             if (successParam === 'true' && emailParam) {
                 userEmail = emailParam.toLowerCase().trim();
-                sessionStorage.setItem('aurabrief_user', userEmail);
+                localStorage.setItem('aurabrief_user', userEmail);
                 
                 if (googleLinkedParam === 'true') {
-                    sessionStorage.setItem('google_verified_override', 'true');
+                    localStorage.setItem('google_verified_override', 'true');
                 }
                 
-                // Scrub the parameters out cleanly so a page refresh doesn't break things
+                // Clear the parameters instantly so the address bar is clean
                 window.history.replaceState({}, document.title, "/");
             } else {
-                // Double check storage to make sure the email wasn't dropped on reload
-                userEmail = sessionStorage.getItem('aurabrief_user');
+                // Ensure fallback retrieval checks localStorage
+                userEmail = localStorage.getItem('aurabrief_user');
             }
             
             initializeGeolocator();
             await evaluateApplicationState();
         };
 
+        function initializeGeolocator() {
+            if ("geolocation" in navigator) {
+                navigator.geolocation.getCurrentPosition((position) => {
+                    geoCoordinates = { lat: position.coords.latitude, lon: position.coords.longitude };
+                    updateLiveUIClockMetadata();
+                }, (err) => {
+                    console.log("Location access declined.");
+                    updateLiveUIClockMetadata();
+                });
+            } else {
+                updateLiveUIClockMetadata();
+            }
+        }
+
+        function updateLiveUIClockMetadata() {
+            const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+            const now = new Date();
+            const dateString = now.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+            const timeString = now.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+            const pill = document.getElementById('environmentPill');
+            if(pill) pill.innerText = `${dateString} | ${timeString} (${tz})`;
+        }
+
         async function evaluateApplicationState() {
-            // If email is missing entirely, show the login panel
+            // Flow Point 1: If email is missing, show Sign In / Register Page
             if (!userEmail) {
                 document.getElementById('authSection').classList.remove('hidden');
                 document.getElementById('linkSection').classList.add('hidden');
@@ -111,8 +136,8 @@
                 return;
             }
 
-            // Trust the override string immediately to completely bypass server-write delay checks
-            const hasOverride = sessionStorage.getItem('google_verified_override') === 'true';
+            // Trust the override directly to bypass any asynchronous database writing lag
+            const hasOverride = localStorage.getItem('google_verified_override') === 'true';
             let hasGoogleLink = hasOverride;
             
             if (!hasGoogleLink) {
@@ -120,7 +145,7 @@
             }
             
             if (hasGoogleLink) {
-                // If linked successfully or overridden, show the dashboard metrics container
+                // Flow Point 3: Land directly onto the generating page dashboard
                 document.getElementById('authSection').classList.add('hidden');
                 document.getElementById('linkSection').classList.add('hidden');
                 document.getElementById('dashboardSection').classList.remove('hidden');
@@ -129,7 +154,7 @@
                 await fetchActiveAutomationRules(); 
                 setInterval(updateLiveUIClockMetadata, 10000);
             } else {
-                // Fall back to link section only if they explicitly don't have a token anywhere
+                // Flow Point 2: Send logged-in users who lack a Google Link to the Connect Workspace Page
                 document.getElementById('authSection').classList.add('hidden');
                 document.getElementById('linkSection').classList.remove('hidden');
                 document.getElementById('dashboardSection').classList.add('hidden');
@@ -138,7 +163,7 @@
 
         function triggerClearSession() {
             if(audioTrack) { audioTrack.pause(); audioTrack = null; }
-            sessionStorage.clear();
+            localStorage.clear();
             userEmail = null;
             evaluateApplicationState();
         }
@@ -193,7 +218,7 @@
                 const data = await res.json();
                 if (data.error) throw new Error(data.error);
                 userEmail = data.email.toLowerCase().trim();
-                sessionStorage.setItem('aurabrief_user', userEmail);
+                localStorage.setItem('aurabrief_user', userEmail);
                 await evaluateApplicationState();
             } catch (err) { alert(err.message); }
         }
