@@ -77,32 +77,23 @@
         let userEmail = localStorage.getItem('aurabrief_user');
         let geoCoordinates = null;
 
-       window.onload = async () => {
-            const params = new URLSearchParams(window.location.search);
-            
-            // Checks for both potential parameter variants ('email' or 'state') sent by the server
-            const urlEmail = params.get('email') || params.get('state');
-            const isSuccess = params.get('login_success') === 'true';
-            
-            if (isSuccess && urlEmail) {
-                // Securely anchor the identity state immediately 
-                userEmail = urlEmail.toLowerCase().trim();
-                sessionStorage.setItem('aurabrief_user', userEmail);
-                sessionStorage.setItem('google_verified_override', 'true');
-                
-                // Clear the parameters from the URL window completely
-                window.history.replaceState({}, document.title, "/");
-            } else {
-                // If not returning from a redirect, pull the existing signed-in profile session
-                userEmail = sessionStorage.getItem('aurabrief_user');
-            }
-            
-            initializeGeolocator();
-            
-            // Run the state check to enforce the UI layout toggle
-            await evaluateApplicationState();
-        };
-
+        window.onload = async () => {
+    const params = new URLSearchParams(window.location.search);
+    const successParam = params.get('login_success');
+    const emailParam = params.get('email') || params.get('state');
+    
+    // Explicitly pull from storage if not returning from a redirect parameter sweep
+    userEmail = emailParam || sessionStorage.getItem('aurabrief_user') || localStorage.getItem('aurabrief_user');
+    
+    if (successParam === 'true' && emailParam) {
+        sessionStorage.setItem('aurabrief_user', userEmail);
+        sessionStorage.setItem('google_verified_override', 'true');
+        window.history.replaceState({}, document.title, "/");
+    }
+    
+    initializeGeolocator();
+    await evaluateApplicationState();
+};
         async function evaluateApplicationState() {
             if (!userEmail) {
                 document.getElementById('authSection').classList.remove('hidden');
