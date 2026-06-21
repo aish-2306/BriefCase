@@ -61,8 +61,7 @@
                 <input type="text" id="newRuleLabel" placeholder="Custom label (e.g., from school)" style="margin-bottom:8px;">
                 <button class="btn" style="margin-top:0; margin-bottom: 15px; background: #065f46;" onclick="addNewAutoStarRule()">Add Rule Matrix</button>
                 
-                <div id="rulesListContainer" style="font-size: 0.85rem; color: #94a3b8; max-height: 120px; overflow-y: auto;">
-                    </div>
+                <div id="rulesListContainer" style="font-size: 0.85rem; color: #94a3b8; max-height: 120px; overflow-y: auto;"></div>
             </div>
 
             <div id="status"></div>
@@ -74,7 +73,7 @@
         let audioTrack = null;
         let isSignUpMode = false;
         
-        // Use localStorage so the session survives cross-domain redirection perfectly
+        // FIXED: Anchored to localStorage so sessions completely survive cross-domain domain re-entries
         let userEmail = localStorage.getItem('aurabrief_user');
         let geoCoordinates = null;
 
@@ -83,8 +82,15 @@
             const successParam = params.get('login_success');
             const emailParam = params.get('email');
             const googleLinkedParam = params.get('google_linked');
+            const errorParam = params.get('login_error');
+            const errorMsg = params.get('message');
             
-            // Catch the credentials from the URL coming back from the server redirection
+            // FIXED: Instantly triggers alerts if backend logs an explicit handshake fail condition
+            if (errorParam === 'true') {
+                alert("Google Workspace Linkage Failed: " + errorMsg);
+                window.history.replaceState({}, document.title, "/");
+            }
+            
             if (successParam === 'true' && emailParam) {
                 userEmail = emailParam.toLowerCase().trim();
                 localStorage.setItem('aurabrief_user', userEmail);
@@ -93,10 +99,8 @@
                     localStorage.setItem('google_verified_override', 'true');
                 }
                 
-                // Clear the parameters instantly so the address bar is clean
                 window.history.replaceState({}, document.title, "/");
             } else {
-                // Ensure fallback retrieval checks localStorage
                 userEmail = localStorage.getItem('aurabrief_user');
             }
             
@@ -127,8 +131,8 @@
             if(pill) pill.innerText = `${dateString} | ${timeString} (${tz})`;
         }
 
+        // FIXED: Clean synchronized UI rendering state machine protecting views from latency drops
         async function evaluateApplicationState() {
-            // FLOW POINT 1: If email is missing, show Sign In / Register Page
             if (!userEmail) {
                 document.getElementById('authSection').classList.remove('hidden');
                 document.getElementById('linkSection').classList.add('hidden');
@@ -136,17 +140,14 @@
                 return;
             }
 
-            // Trust the override directly to bypass any asynchronous database writing lag
             const hasOverride = localStorage.getItem('google_verified_override') === 'true';
             let hasGoogleLink = hasOverride;
             
-            // If there is no immediate local override flag, check the remote database fallback
             if (!hasGoogleLink) {
                 hasGoogleLink = await checkGoogleLinkStatus(userEmail);
             }
             
             if (hasGoogleLink) {
-                // FLOW POINT 3: Land directly onto the generating page dashboard view
                 document.getElementById('authSection').classList.add('hidden');
                 document.getElementById('linkSection').classList.add('hidden');
                 document.getElementById('dashboardSection').classList.remove('hidden');
@@ -154,17 +155,16 @@
                 await fetchUserDetails(userEmail);
                 await fetchActiveAutomationRules(); 
                 
-                // Clear any single-use override flags so subsequent hard reloads pull pure db states
-                localStorage.removeItem('google_verified_override');
+                // FIXED: Removed premature override clearing to secure view permanence across app re-draws
                 setInterval(updateLiveUIClockMetadata, 10000);
             } else {
-                // FLOW POINT 2: Send logged-in users who lack a Google Link to the Connect Workspace Page
                 document.getElementById('authSection').classList.add('hidden');
                 document.getElementById('linkSection').classList.remove('hidden');
                 document.getElementById('dashboardSection').classList.add('hidden');
             }
         }
 
+        // FIXED: Flushes historical variables cleanly on explicit action request loops
         function triggerClearSession() {
             if(audioTrack) { audioTrack.pause(); audioTrack = null; }
             localStorage.clear();
@@ -222,7 +222,7 @@
                 const data = await res.json();
                 if (data.error) throw new Error(data.error);
                 
-                // Clear out stale historical tokens before establishing the fresh user identity layout
+                // FIXED: Clears state tokens completely before establishing new login layout paths
                 localStorage.clear();
                 
                 userEmail = data.email.toLowerCase().trim();

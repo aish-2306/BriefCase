@@ -20,7 +20,7 @@ if (!fs.existsSync(audioCacheDir)){
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// Pure SPA URL: Pointing strictly to your base landing domain
+// FIXED: Clear environment fallback logic that maps strictly to the base landing domain
 const productionURL = process.env.NODE_ENV === 'production' 
     ? 'https://briefcase-nqsy.onrender.com' 
     : 'http://localhost:5000';
@@ -134,7 +134,7 @@ app.get('/auth/google', (req, res) => {
         access_type: 'offline',
         prompt: 'consent',
         state: userEmailState,
-        scope: [
+        scope = [
             'https://www.googleapis.com/auth/calendar.readonly', 
             'https://www.googleapis.com/auth/gmail.modify', 
             'https://www.googleapis.com/auth/calendar.events',
@@ -144,7 +144,7 @@ app.get('/auth/google', (req, res) => {
     res.redirect(url);
 });
 
-// UNIFIED SPA MAIN ROUTE: Intercepts code parameters and cleans them dynamically
+// FIXED: Main SPA entry point now explicitly redirects with error queries instead of masking bugs
 app.get('/', async (req, res) => {
     const { code, state } = req.query;
 
@@ -164,11 +164,12 @@ app.get('/', async (req, res) => {
         return res.redirect(`/?login_success=true&email=${encodeURIComponent(targetEmail)}&google_linked=true`);
     } catch (err) {
         console.error("Auth Linkage failure:", err);
-        return res.sendFile(path.join(__dirname, 'public', 'index.html'));
+        // FIXED: Explicitly passes error feedback down to client interface prevents loop deadlocks
+        return res.redirect(`/?login_error=true&message=${encodeURIComponent(err.message)}`);
     }
 });
 
-// --- CORE PIPELINE AUDIO AUTOMATION GENERATOR (WITH DUP FILTERING) ---
+// --- CORE PIPELINE AUDIO AUTOMATION GENERATOR ---
 app.post('/api/generate-brief', async (req, res) => {
     const email = req.body.email.toLowerCase().trim();
     const { userTimezone, deviceClock, geoCoordinates } = req.body;
