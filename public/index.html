@@ -79,17 +79,22 @@
         window.onload = async () => {
             const params = new URLSearchParams(window.location.search);
             const successParam = params.get('login_success');
-            const emailParam = params.get('email');
             const googleLinkedParam = params.get('google_linked');
             
-            if (successParam === 'true' && emailParam) {
-                userEmail = emailParam.toLowerCase().trim();
-                sessionStorage.setItem('aurabrief_user', userEmail);
+            // Google sends the email back inside the 'state' parameter 
+            const stateParam = params.get('state') || params.get('email');
+            
+            if (successParam === 'true' || stateParam) {
+                if (stateParam) {
+                    userEmail = stateParam.toLowerCase().trim();
+                    sessionStorage.setItem('aurabrief_user', userEmail);
+                }
+                
                 if (googleLinkedParam === 'true') {
-                    // Force set this explicitly to guarantee state persistence across the redirect
                     sessionStorage.setItem('google_verified_override', 'true');
                 }
-                // Cleans the parameters out of the address bar
+                
+                // Scrub the parameters from the URL bar cleanly
                 window.history.replaceState({}, document.title, "/");
             }
             
