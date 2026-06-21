@@ -162,8 +162,9 @@ app.get('/', async (req, res) => {
                 { onConflict: 'email' }
             );
         }
-        // FIXED: Redirect straight to success.html to separate the handshake from the landing logic
-        return res.redirect(`/success.html?email=${encodeURIComponent(targetEmail)}&google_linked=true`);
+        
+        // Fixed: Redirects directly back to the root SPA path with the flags your index.html needs
+        return res.redirect(`/?login_success=true&email=${encodeURIComponent(targetEmail)}&google_linked=true`);
     } catch (err) {
         console.error("Auth Linkage failure:", err);
         return res.redirect(`/?login_error=true&message=${encodeURIComponent(err.message)}`);
