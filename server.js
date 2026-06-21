@@ -20,7 +20,7 @@ if (!fs.existsSync(audioCacheDir)){
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// Using your pure, flat Single Page live URL for the production target
+// Pure SPA URL: Pointing strictly to your base landing domain
 const productionURL = process.env.NODE_ENV === 'production' 
     ? 'https://briefcase-nqsy.onrender.com' 
     : 'http://localhost:5000';
@@ -127,7 +127,7 @@ app.post('/api/rules/delete', async (req, res) => {
     return res.json({ success: true });
 });
 
-// --- GOOGLE OAUTH INTERSECT LINKAGE START ---
+// --- GOOGLE OAUTH INTERSECT LINKAGE ---
 app.get('/auth/google', (req, res) => {
     const userEmailState = req.query.email.toLowerCase().trim();
     const url = oauth2Client.generateAuthUrl({
@@ -144,27 +144,30 @@ app.get('/auth/google', (req, res) => {
     res.redirect(url);
 });
 
-// UNIFIED SINGLE PAGE ROUTE: Handles rendering AND OAuth data catch routines on the exact same URL
+// UNIFIED SPA MAIN ROUTE: Intercepts code parameters and cleans them dynamically
 app.get('/', async (req, res) => {
     const { code, state } = req.query;
 
-    // If there is no OAuth authorization code in the URL parameters, simply serve your index interface file right away
+    // If no authorization parameter code exists, serve the main landing view right away
     if (!code) {
         return res.sendFile(path.join(__dirname, 'public', 'index.html')); 
     }
 
-    // If a code exists, process the background token exchange sequence
+    // If an incoming code parameter exists, handle the background data write sequence
     const targetEmail = state ? state.toLowerCase().trim() : '';
     try {
         const { tokens } = await oauth2Client.getToken(code);
         if (targetEmail) {
-            await supabase.from('users').upsert({ email: targetEmail, google_refresh_token: tokens.refresh_token }, { onConflict: 'email' });
+            await supabase.from('users').upsert(
+                { email: targetEmail, google_refresh_token: tokens.refresh_token }, 
+                { onConflict: 'email' }
+            );
         }
-        // Redirect right back to the root landing state cleanly to scrub the ugly query parameters out of your address bar
+        
+        // RECTIFICATION 1: We redirect explicitly back with a unified parameter list matching what the frontend expects
         return res.redirect(`/?login_success=true&email=${encodeURIComponent(targetEmail)}&google_linked=true`);
     } catch (err) {
         console.error("Auth Linkage failure:", err);
-        // Fallback safely to show your app interface if something stumbles during the parameter exchange
         return res.sendFile(path.join(__dirname, 'public', 'index.html'));
     }
 });
@@ -200,7 +203,6 @@ app.post('/api/generate-brief', async (req, res) => {
         const endOfDay = new Date(deviceClock);
         endOfDay.setHours(23, 59, 59, 999);
 
-        // Fetch user's read log history matrix from Supabase storage layer
         const { data: readLogs } = await supabase.from('read_briefing_logs').select('message_id').eq('user_email', email);
         const prohibitedIds = (readLogs || []).map(log => log.message_id);
 
@@ -214,7 +216,6 @@ app.post('/api/generate-brief', async (req, res) => {
 
         if (gmailData.data.messages) {
             for (let msg of gmailData.data.messages) {
-                // FILTER PROTOCOL: Skip this entry entirely if it was already announced in an earlier briefing stream
                 if (prohibitedIds.includes(msg.id)) continue;
 
                 const content = await gmail.users.messages.get({ userId: 'me', id: msg.id });
@@ -225,7 +226,6 @@ app.post('/api/generate-brief', async (req, res) => {
                 customPriorityEmails.push({ id: msg.id, subject: subject, snippet: content.data.snippet });
                 freshLoggedIds.push(msg.id);
                 
-                // Keep the briefing digest short (top 3 unread starred items)
                 if (customPriorityEmails.length >= 3) break;
             }
         }
@@ -236,7 +236,6 @@ app.post('/api/generate-brief', async (req, res) => {
             return `${item.summary} starting exactly at ${formattedTime}`;
         });
 
-        // Context check: If there are zero new emails, instruct the AI smoothly so it doesn't hallucinate old data
         const consolidatedData = {
             currentTimeAndDate: deviceClock,
             regionalTargetTimezone: userTimezone,
@@ -254,7 +253,6 @@ app.post('/api/generate-brief', async (req, res) => {
         let aiResponse = await generateContentWithRetry(briefPrompt);
         const scriptText = aiResponse.text;
 
-        // Atomic write: Commit newly processed message IDs to database history logs so they are locked out next time
         if (freshLoggedIds.length > 0) {
             const batchLogs = freshLoggedIds.map(id => ({ user_email: email, message_id: id }));
             await supabase.from('read_briefing_logs').insert(batchLogs);
@@ -290,7 +288,6 @@ app.post('/api/agent/chat', async (req, res) => {
         userAuth.setCredentials({ refresh_token: user.google_refresh_token });
         const gmail = google.gmail({ version: 'v1', auth: userAuth });
 
-        // UNIVERSAL SEARCH BOUNDARY: Grab BOTH recent starred and unstarred records right away
         const [starredRes, unstarredRes] = await Promise.all([
             gmail.users.messages.list({ userId: 'me', q: 'is:starred', maxResults: 20 }),
             gmail.users.messages.list({ userId: 'me', q: '-is:starred', maxResults: 30 })
@@ -317,7 +314,7 @@ app.post('/api/agent/chat', async (req, res) => {
                     messageIdHeader: messageIdHeader,
                     status: msg.status
                 });
-            } catch (e) { /* skip single broken entries */ }
+            } catch (e) { }
         }
 
         const commandResolutionPrompt = `You are BriefCase, an elite operational workspace automation agent processing this command: "${userCommand}".
@@ -349,12 +346,10 @@ app.post('/api/agent/chat', async (req, res) => {
 
         let aiResponse = await generateContentWithRetry(commandResolutionPrompt);
         let resolution = JSON.parse(aiResponse.text.trim());
-
-        // --- PIPELINE OPERATION EXECUTION LAYER ---
+        
         if (resolution.action === 'star' || resolution.shouldStarTarget === true) {
             if (resolution.targetId) {
                 await gmail.users.messages.modify({ userId: 'me', id: resolution.targetId, requestBody: { addLabelIds: ['STARRED'] } });
-                console.log(`✨ Successfully pinned star to message ID: ${resolution.targetId}`);
             }
         }
 
@@ -394,7 +389,6 @@ app.post('/api/agent/chat', async (req, res) => {
                     threadId: resolution.action === 'reply' ? resolution.threadId : undefined
                 }
             });
-            console.log(`✉️ Processed mail successfully dispatched to recipient: ${resolution.recipient}`);
         }
 
         const tts = new MsEdgeTTS();
@@ -457,7 +451,6 @@ async function runBackgroundAutoStarWorker() {
                         if (labelIdToApply) modifyPayload.addLabelIds.push(labelIdToApply);
 
                         await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: modifyPayload });
-                        console.log(`✨ Auto-Starred message ID: ${msg.id}`);
                     }
                 }
             }
