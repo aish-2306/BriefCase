@@ -10,7 +10,10 @@ require('dotenv').config();
 
 const app = express();
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+// index: false prevents express.static from auto-serving index.html for GET '/'.
+// Without this, it intercepts Google's OAuth redirect (e.g. /?code=...&state=...)
+// before our custom '/' handler below ever runs, so the token exchange never happens.
+app.use(express.static(path.join(__dirname, 'public'), { index: false }));
 
 const audioCacheDir = path.join(__dirname, 'public', 'audio');
 if (!fs.existsSync(audioCacheDir)){
@@ -157,10 +160,11 @@ app.get('/', async (req, res) => {
     try {
         const { tokens } = await oauth2Client.getToken(code);
         if (targetEmail) {
-            await supabase.from('users').upsert(
-                { email: targetEmail, google_refresh_token: tokens.refresh_token }, 
-                { onConflict: 'email' }
-            );
+            const upsertPayload = { email: targetEmail };
+            // Only overwrite the stored refresh_token if Google actually issued a new one.
+            // Otherwise a re-consent without a fresh refresh_token would null out a working link.
+            if (tokens.refresh_token) upsertPayload.google_refresh_token = tokens.refresh_token;
+            await supabase.from('users').upsert(upsertPayload, { onConflict: 'email' });
         }
         
         // Passing both email and state parameters guarantees the front-end interceptor reads it cleanly
