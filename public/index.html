@@ -88,6 +88,7 @@
     if (successParam === 'true' && emailParam) {
         sessionStorage.setItem('aurabrief_user', userEmail);
         sessionStorage.setItem('google_verified_override', 'true');
+        localStorage.setItem('aurabrief_user', userEmail);
         window.history.replaceState({}, document.title, "/");
     }
     
